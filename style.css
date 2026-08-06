@@ -1,0 +1,36 @@
+body {
+    background:#111;
+    color:white;
+    font-family:Arial;
+    text-align:center;
+}
+
+h1 {
+    color:#00ff99;
+}
+
+.mixer {
+    display:flex;
+    justify-content:center;
+    gap:20px;
+    margin-top:40px;
+}
+
+.channel {
+    background:#222;
+    padding:20px;
+    border-radius:15px;
+    width:120px;
+}
+
+input[type=range] {
+    width:100px;
+    height:200px;
+    writing-mode:bt-lr;
+    appearance:slider-vertical;
+}
+
+label {
+    display:block;
+    margin-top:10px;
+}
