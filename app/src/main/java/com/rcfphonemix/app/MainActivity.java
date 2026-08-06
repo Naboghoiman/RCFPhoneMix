@@ -8,13 +8,14 @@ import android.media.audiofx.Equalizer;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.Gravity;
-import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import java.util.Locale;
 
 public class MainActivity extends Activity {
 
@@ -49,6 +50,7 @@ public class MainActivity extends Activity {
 
     private void buildInterface() {
         ScrollView scrollView = new ScrollView(this);
+        scrollView.setFillViewport(true);
         scrollView.setBackgroundColor(Color.rgb(12, 16, 22));
 
         LinearLayout root = new LinearLayout(this);
@@ -85,6 +87,13 @@ public class MainActivity extends Activity {
         eqContainer = new LinearLayout(this);
         eqContainer.setOrientation(LinearLayout.VERTICAL);
         root.addView(eqContainer);
+
+        TextView waitingText = new TextView(this);
+        waitingText.setText("Select a song to activate the equalizer.");
+        waitingText.setTextColor(Color.GRAY);
+        waitingText.setTextSize(14);
+        waitingText.setPadding(0, dp(10), 0, dp(10));
+        eqContainer.addView(waitingText);
 
         TextView masterLabel = new TextView(this);
         masterLabel.setText("MASTER VOLUME: 100%");
@@ -129,8 +138,8 @@ public class MainActivity extends Activity {
 
         TextView note = new TextView(this);
         note.setText(
-                "Select a music file inside this app. " +
-                "The four controls will process the app's music output."
+                "The equalizer processes music selected and played " +
+                "inside RCF Phone Mix."
         );
         note.setTextColor(Color.GRAY);
         note.setTextSize(13);
@@ -193,7 +202,17 @@ public class MainActivity extends Activity {
                 data != null &&
                 data.getData() != null
         ) {
-            loadMusic(data.getData());
+            Uri audioUri = data.getData();
+
+            try {
+                getContentResolver().takePersistableUriPermission(
+                        audioUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                );
+            } catch (Exception ignored) {
+            }
+
+            loadMusic(audioUri);
         }
     }
 
@@ -202,6 +221,7 @@ public class MainActivity extends Activity {
 
         trackName.setText("Loading music...");
         playButton.setEnabled(false);
+        playButton.setText("PLAY");
 
         mediaPlayer = new MediaPlayer();
 
@@ -216,28 +236,37 @@ public class MainActivity extends Activity {
 
             mediaPlayer.setOnCompletionListener(player -> {
                 playButton.setText("PLAY");
-                player.seekTo(0);
+
+                try {
+                    player.seekTo(0);
+                } catch (Exception ignored) {
+                }
             });
 
-            mediaPlayer.setOnErrorListener((player, what, extra) -> {
-                Toast.makeText(
-                        this,
-                        "Unable to play this audio file.",
-                        Toast.LENGTH_LONG
-                ).show();
+            mediaPlayer.setOnErrorListener(
+                    (player, what, extra) -> {
+                        Toast.makeText(
+                                MainActivity.this,
+                                "Unable to play this audio file.",
+                                Toast.LENGTH_LONG
+                        ).show();
 
-                trackName.setText("Audio loading failed");
-                return true;
-            });
+                        trackName.setText("Audio loading failed");
+                        playButton.setEnabled(false);
+
+                        return true;
+                    }
+            );
 
             mediaPlayer.prepareAsync();
 
         } catch (Exception exception) {
             trackName.setText("Audio loading failed");
+            playButton.setEnabled(false);
 
             Toast.makeText(
                     this,
-                    exception.getMessage(),
+                    "Could not open the selected music.",
                     Toast.LENGTH_LONG
             ).show();
         }
@@ -251,6 +280,7 @@ public class MainActivity extends Activity {
         try {
             if (equalizer != null) {
                 equalizer.release();
+                equalizer = null;
             }
 
             equalizer = new Equalizer(
@@ -262,6 +292,17 @@ public class MainActivity extends Activity {
             createEqualizerControls();
 
         } catch (Exception exception) {
+            eqContainer.removeAllViews();
+
+            TextView unsupportedText = new TextView(this);
+            unsupportedText.setText(
+                    "Equalizer is not supported on this device."
+            );
+            unsupportedText.setTextColor(Color.LTGRAY);
+            unsupportedText.setTextSize(14);
+
+            eqContainer.addView(unsupportedText);
+
             Toast.makeText(
                     this,
                     "Equalizer is not supported on this device.",
@@ -278,31 +319,47 @@ public class MainActivity extends Activity {
         }
 
         short[] levelRange = equalizer.getBandLevelRange();
-        short minimumLevel = levelRange[0];
-        short maximumLevel = levelRange[1];
 
-        for (int index = 0; index < targetFrequencies.length; index++) {
+        final short minimumLevel = levelRange[0];
+        final short maximumLevel = levelRange[1];
+
+        for (
+                int index = 0;
+                index < targetFrequencies.length;
+                index++
+        ) {
+            final int bandIndex = index;
+
             final short equalizerBand =
                     equalizer.getBand(
-                            targetFrequencies[index] * 1000
+                            targetFrequencies[bandIndex] * 1000
                     );
 
-            TextView label = new TextView(this);
+            final TextView label = new TextView(this);
+
             label.setText(
-                    bandNames[index] +
+                    bandNames[bandIndex] +
                     "  •  " +
-                    targetFrequencies[index] +
+                    targetFrequencies[bandIndex] +
                     " Hz  •  0.0 dB"
             );
 
             label.setTextColor(Color.WHITE);
             label.setTextSize(15);
-            label.setPadding(0, dp(12), 0, dp(4));
+            label.setPadding(
+                    0,
+                    dp(12),
+                    0,
+                    dp(4)
+            );
+
             eqContainer.addView(label);
 
             SeekBar seekBar = new SeekBar(this);
 
-            int totalRange = maximumLevel - minimumLevel;
+            int totalRange =
+                    maximumLevel - minimumLevel;
+
             seekBar.setMax(totalRange);
             seekBar.setProgress(-minimumLevel);
 
@@ -321,19 +378,25 @@ public class MainActivity extends Activity {
                                     );
 
                             try {
+                                if (equalizer == null) {
+                                    return;
+                                }
+
                                 equalizer.setBandLevel(
                                         equalizerBand,
                                         level
                                 );
 
-                                float decibels = level / 100f;
+                                float decibels =
+                                        level / 100f;
 
                                 label.setText(
-                                        bandNames[index] +
+                                        bandNames[bandIndex] +
                                         "  •  " +
-                                        targetFrequencies[index] +
+                                        targetFrequencies[bandIndex] +
                                         " Hz  •  " +
                                         String.format(
+                                                Locale.US,
                                                 "%.1f dB",
                                                 decibels
                                         )
@@ -366,12 +429,20 @@ public class MainActivity extends Activity {
             return;
         }
 
-        if (mediaPlayer.isPlaying()) {
-            mediaPlayer.pause();
-            playButton.setText("PLAY");
-        } else {
-            mediaPlayer.start();
-            playButton.setText("PAUSE");
+        try {
+            if (mediaPlayer.isPlaying()) {
+                mediaPlayer.pause();
+                playButton.setText("PLAY");
+            } else {
+                mediaPlayer.start();
+                playButton.setText("PAUSE");
+            }
+        } catch (Exception exception) {
+            Toast.makeText(
+                    this,
+                    "Playback could not be started.",
+                    Toast.LENGTH_SHORT
+            ).show();
         }
     }
 
@@ -386,12 +457,26 @@ public class MainActivity extends Activity {
 
     private void releaseAudio() {
         if (equalizer != null) {
-            equalizer.release();
+            try {
+                equalizer.setEnabled(false);
+                equalizer.release();
+            } catch (Exception ignored) {
+            }
+
             equalizer = null;
         }
 
         if (mediaPlayer != null) {
-            mediaPlayer.release();
+            try {
+                mediaPlayer.stop();
+            } catch (Exception ignored) {
+            }
+
+            try {
+                mediaPlayer.release();
+            } catch (Exception ignored) {
+            }
+
             mediaPlayer = null;
         }
     }
@@ -401,4 +486,4 @@ public class MainActivity extends Activity {
         releaseAudio();
         super.onDestroy();
     }
-    }
+            }
