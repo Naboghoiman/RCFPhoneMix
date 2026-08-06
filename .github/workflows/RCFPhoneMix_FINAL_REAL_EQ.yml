@@ -1,0 +1,791 @@
+name: Build RCF Phone Mix FINAL Real EQ APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/RCFPhoneMix_FINAL_REAL_EQ.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Create stable real-EQ Android project
+        shell: bash
+        run: |
+          PROJECT_DIR="$RUNNER_TEMP/RCFPhoneMixFinal"
+          mkdir -p "$PROJECT_DIR/app/src/main/java/com/rcfphonemix/app"
+          cat > "$PROJECT_DIR/settings.gradle" <<'RCF_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "RCFPhoneMixFinal"
+          include ":app"
+          RCF_EOF
+          cat > "$PROJECT_DIR/build.gradle" <<'RCF_EOF'
+          plugins {
+              id 'com.android.application' version '8.10.1' apply false
+          }
+          RCF_EOF
+          cat > "$PROJECT_DIR/gradle.properties" <<'RCF_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          RCF_EOF
+          cat > "$PROJECT_DIR/app/build.gradle" <<'RCF_EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.rcfphonemix.app'
+              compileSdk 36
+
+              defaultConfig {
+                  applicationId 'com.rcfphonemix.app'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 3
+                  versionName '3.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+              }
+          }
+          RCF_EOF
+          cat > "$PROJECT_DIR/app/proguard-rules.pro" <<'RCF_EOF'
+
+          RCF_EOF
+          cat > "$PROJECT_DIR/app/src/main/AndroidManifest.xml" <<'RCF_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="true"
+                  android:hardwareAccelerated="true"
+                  android:label="RCF Phone Mix"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          RCF_EOF
+          cat > "$PROJECT_DIR/app/src/main/java/com/rcfphonemix/app/MainActivity.java" <<'RCF_EOF'
+          package com.rcfphonemix.app;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.database.Cursor;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.media.AudioAttributes;
+          import android.media.MediaPlayer;
+          import android.media.audiofx.Equalizer;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.provider.OpenableColumns;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.HorizontalScrollView;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.SeekBar;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.io.IOException;
+          import java.util.Locale;
+
+          public final class MainActivity extends Activity {
+              private static final int PICK_AUDIO_REQUEST = 4102;
+              private static final int BLUE = Color.rgb(39, 164, 220);
+              private static final int DARK = Color.rgb(8, 12, 17);
+              private static final int PANEL = Color.rgb(23, 30, 38);
+              private static final int PANEL_2 = Color.rgb(32, 42, 53);
+              private static final int MUTED = Color.rgb(161, 174, 188);
+              private static final int GREEN = Color.rgb(42, 156, 91);
+              private static final int RED = Color.rgb(145, 55, 55);
+
+              private final Handler handler = new Handler(Looper.getMainLooper());
+              private final Runnable progressUpdater = new Runnable() {
+                  @Override
+                  public void run() {
+                      updateProgress();
+                      handler.postDelayed(this, 350L);
+                  }
+              };
+
+              private MediaPlayer player;
+              private Equalizer equalizer;
+              private TextView trackName;
+              private TextView currentTime;
+              private TextView totalTime;
+              private TextView statusText;
+              private SeekBar progressBar;
+              private Button playButton;
+              private Button eqButton;
+              private LinearLayout bandsContainer;
+              private SeekBar[] bandSeekBars = new SeekBar[0];
+              private TextView[] bandValues = new TextView[0];
+              private short minimumBandLevel;
+              private short maximumBandLevel;
+              private boolean userSeeking;
+              private boolean eqEnabled = true;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  buildInterface();
+                  handler.post(progressUpdater);
+              }
+
+              private void buildInterface() {
+                  ScrollView scrollView = new ScrollView(this);
+                  scrollView.setFillViewport(true);
+                  scrollView.setBackgroundColor(DARK);
+
+                  LinearLayout root = vertical();
+                  root.setPadding(dp(14), dp(18), dp(14), dp(30));
+
+                  TextView logo = text("RCF", 40, Color.WHITE, true);
+                  logo.setGravity(Gravity.CENTER);
+                  root.addView(logo, matchWrap());
+
+                  TextView title = text("PHONE MIX", 21, BLUE, true);
+                  title.setGravity(Gravity.CENTER);
+                  root.addView(title, matchWrap());
+
+                  TextView subtitle = text("REAL MUSIC PLAYER  •  SYSTEM AUDIO EQ", 12, MUTED, false);
+                  subtitle.setGravity(Gravity.CENTER);
+                  subtitle.setPadding(0, dp(4), 0, dp(16));
+                  root.addView(subtitle, matchWrap());
+
+                  root.addView(buildPlayerPanel(), matchWrap());
+                  root.addView(buildPresetPanel(), matchWrapWithTop(12));
+
+                  TextView eqTitle = sectionTitle("REAL-TIME EQUALIZER");
+                  root.addView(eqTitle, matchWrapWithTop(12));
+
+                  bandsContainer = vertical();
+                  TextView waiting = text("Select music to activate the phone audio equalizer.", 13, MUTED, false);
+                  waiting.setGravity(Gravity.CENTER);
+                  waiting.setPadding(dp(12), dp(18), dp(12), dp(18));
+                  bandsContainer.addView(waiting, matchWrap());
+                  root.addView(bandsContainer, matchWrap());
+
+                  root.addView(buildMasterVolume(), matchWrapWithTop(12));
+
+                  statusText = text("Ready — select a song from your phone.", 12, MUTED, false);
+                  statusText.setGravity(Gravity.CENTER);
+                  statusText.setPadding(dp(8), dp(18), dp(8), 0);
+                  root.addView(statusText, matchWrap());
+
+                  TextView note = text(
+                          "The controls are attached to the same audio session that plays the selected song, so moving an EQ band changes the sound you hear.",
+                          11, MUTED, false
+                  );
+                  note.setGravity(Gravity.CENTER);
+                  note.setPadding(dp(8), dp(12), dp(8), 0);
+                  root.addView(note, matchWrap());
+
+                  scrollView.addView(root);
+                  setContentView(scrollView);
+              }
+
+              private View buildPlayerPanel() {
+                  LinearLayout panel = vertical();
+                  panel.setPadding(dp(14), dp(14), dp(14), dp(14));
+                  panel.setBackground(rounded(PANEL, 12, Color.rgb(54, 70, 86)));
+
+                  trackName = text("No music selected", 16, Color.WHITE, true);
+                  trackName.setGravity(Gravity.CENTER);
+                  trackName.setSingleLine(true);
+                  panel.addView(trackName, matchWrap());
+
+                  progressBar = new SeekBar(this);
+                  progressBar.setMax(1000);
+                  progressBar.setProgress(0);
+                  progressBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override
+                      public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                          if (fromUser && player != null && player.getDuration() > 0) {
+                              currentTime.setText(formatTime((long) player.getDuration() * progress / 1000L));
+                          }
+                      }
+
+                      @Override
+                      public void onStartTrackingTouch(SeekBar seekBar) {
+                          userSeeking = true;
+                      }
+
+                      @Override
+                      public void onStopTrackingTouch(SeekBar seekBar) {
+                          if (player != null && player.getDuration() > 0) {
+                              player.seekTo((int) ((long) player.getDuration() * seekBar.getProgress() / 1000L));
+                          }
+                          userSeeking = false;
+                      }
+                  });
+                  panel.addView(progressBar, matchWrap());
+
+                  LinearLayout timeRow = horizontal();
+                  currentTime = text("0:00", 12, MUTED, false);
+                  totalTime = text("0:00", 12, MUTED, false);
+                  totalTime.setGravity(Gravity.END);
+                  timeRow.addView(currentTime, weightedWrap(1f));
+                  timeRow.addView(totalTime, weightedWrap(1f));
+                  panel.addView(timeRow, matchWrap());
+
+                  LinearLayout transport = horizontal();
+                  Button selectButton = button("SELECT MUSIC", BLUE);
+                  selectButton.setOnClickListener(v -> openMusicPicker());
+                  transport.addView(selectButton, weightedHeight(1.25f, 52));
+
+                  playButton = button("PLAY", Color.rgb(35, 117, 169));
+                  playButton.setEnabled(false);
+                  playButton.setOnClickListener(v -> togglePlayback());
+                  LinearLayout.LayoutParams playParams = weightedHeight(1f, 52);
+                  playParams.setMargins(dp(8), 0, 0, 0);
+                  transport.addView(playButton, playParams);
+                  panel.addView(transport, matchWrapWithTop(12));
+
+                  eqButton = button("EQ ON", GREEN);
+                  eqButton.setEnabled(false);
+                  eqButton.setOnClickListener(v -> toggleEqualizer());
+                  panel.addView(eqButton, matchHeightWithTop(48, 9));
+                  return panel;
+              }
+
+              private View buildPresetPanel() {
+                  LinearLayout section = vertical();
+                  section.addView(sectionTitle("PRESETS"), matchWrap());
+
+                  HorizontalScrollView scroller = new HorizontalScrollView(this);
+                  scroller.setHorizontalScrollBarEnabled(false);
+                  LinearLayout row = horizontal();
+                  String[] presets = {"FLAT", "BASS", "VOCAL", "LIVE", "BRIGHT"};
+                  for (String preset : presets) {
+                      Button button = button(preset, PANEL_2);
+                      button.setOnClickListener(v -> applyPreset(preset));
+                      LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(105), dp(44));
+                      if (row.getChildCount() > 0) {
+                          params.setMargins(dp(6), 0, 0, 0);
+                      }
+                      row.addView(button, params);
+                  }
+                  scroller.addView(row);
+                  section.addView(scroller, matchWrap());
+                  return section;
+              }
+
+              private View buildMasterVolume() {
+                  LinearLayout card = vertical();
+                  card.setPadding(dp(12), dp(10), dp(12), dp(12));
+                  card.setBackground(rounded(PANEL, 11, Color.rgb(49, 63, 77)));
+                  card.addView(sectionTitle("MASTER OUTPUT"), matchWrap());
+
+                  TextView value = valueLabel();
+                  value.setText("100%");
+                  card.addView(sliderLabelRow("VOLUME", value), matchWrap());
+
+                  SeekBar master = new SeekBar(this);
+                  master.setMax(100);
+                  master.setProgress(100);
+                  master.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override
+                      public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                          value.setText(progress + "%");
+                          if (player != null) {
+                              float volume = progress / 100f;
+                              player.setVolume(volume, volume);
+                          }
+                      }
+
+                      @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+                      @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+                  });
+                  card.addView(master, matchWrap());
+                  return card;
+              }
+
+              private void openMusicPicker() {
+                  Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  intent.addCategory(Intent.CATEGORY_OPENABLE);
+                  intent.setType("audio/*");
+                  startActivityForResult(intent, PICK_AUDIO_REQUEST);
+              }
+
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode != PICK_AUDIO_REQUEST || resultCode != RESULT_OK || data == null) {
+                      return;
+                  }
+                  Uri uri = data.getData();
+                  if (uri == null) {
+                      return;
+                  }
+                  try {
+                      int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                      getContentResolver().takePersistableUriPermission(uri, flags);
+                  } catch (SecurityException ignored) {
+                      // The temporary read permission is still enough for this playback session.
+                  }
+                  loadSong(uri);
+              }
+
+              private void loadSong(Uri uri) {
+                  releasePlayerOnly();
+                  statusText.setText("Loading audio…");
+                  playButton.setEnabled(false);
+                  eqButton.setEnabled(false);
+                  trackName.setText(getDisplayName(uri));
+                  currentTime.setText("0:00");
+                  totalTime.setText("0:00");
+                  progressBar.setProgress(0);
+
+                  player = new MediaPlayer();
+                  player.setAudioAttributes(new AudioAttributes.Builder()
+                          .setUsage(AudioAttributes.USAGE_MEDIA)
+                          .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                          .build());
+                  player.setOnPreparedListener(mp -> {
+                      attachEqualizer(mp.getAudioSessionId());
+                      totalTime.setText(formatTime(mp.getDuration()));
+                      playButton.setEnabled(true);
+                      playButton.setText("PLAY");
+                      statusText.setText("Real audio session ready.");
+                  });
+                  player.setOnCompletionListener(mp -> {
+                      mp.seekTo(0);
+                      playButton.setText("PLAY");
+                  });
+                  player.setOnErrorListener((mp, what, extra) -> {
+                      statusText.setText("The selected audio file could not be played.");
+                      Toast.makeText(this, "This audio file could not be played.", Toast.LENGTH_LONG).show();
+                      return true;
+                  });
+
+                  try {
+                      player.setDataSource(this, uri);
+                      player.prepareAsync();
+                  } catch (IOException | SecurityException exception) {
+                      statusText.setText("Unable to open this audio file.");
+                      Toast.makeText(this, "Unable to open this audio file.", Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              private void attachEqualizer(int audioSessionId) {
+                  releaseEqualizer();
+                  try {
+                      equalizer = new Equalizer(0, audioSessionId);
+                      equalizer.setEnabled(eqEnabled);
+                      short[] range = equalizer.getBandLevelRange();
+                      minimumBandLevel = range[0];
+                      maximumBandLevel = range[1];
+                      buildBandControls();
+                      eqButton.setEnabled(true);
+                      eqButton.setText(eqEnabled ? "EQ ON" : "EQ OFF");
+                      eqButton.setBackground(rounded(eqEnabled ? GREEN : RED, 9, Color.TRANSPARENT));
+                  } catch (RuntimeException error) {
+                      equalizer = null;
+                      eqButton.setEnabled(false);
+                      bandsContainer.removeAllViews();
+                      TextView unavailable = text("This phone did not expose its built-in equalizer for this audio session.", 13, MUTED, false);
+                      unavailable.setGravity(Gravity.CENTER);
+                      unavailable.setPadding(dp(12), dp(18), dp(12), dp(18));
+                      bandsContainer.addView(unavailable, matchWrap());
+                      statusText.setText("Music playback is ready; equalizer unavailable on this device.");
+                  }
+              }
+
+              private void buildBandControls() {
+                  bandsContainer.removeAllViews();
+                  if (equalizer == null) {
+                      return;
+                  }
+                  short bandCount = equalizer.getNumberOfBands();
+                  bandSeekBars = new SeekBar[bandCount];
+                  bandValues = new TextView[bandCount];
+
+                  for (short band = 0; band < bandCount; band++) {
+                      final short bandIndex = band;
+                      LinearLayout card = vertical();
+                      card.setPadding(dp(12), dp(10), dp(12), dp(12));
+                      card.setBackground(rounded(PANEL, 11, Color.rgb(49, 63, 77)));
+
+                      int centerHz = equalizer.getCenterFreq(band) / 1000;
+                      TextView heading = text("BAND " + (band + 1) + "  •  " + formatFrequency(centerHz), 15, BLUE, true);
+                      card.addView(heading, matchWrap());
+
+                      TextView value = valueLabel();
+                      short level = equalizer.getBandLevel(band);
+                      value.setText(formatBandLevel(level));
+                      card.addView(sliderLabelRow("GAIN", value), matchWrap());
+
+                      SeekBar seekBar = new SeekBar(this);
+                      int span = maximumBandLevel - minimumBandLevel;
+                      seekBar.setMax(span);
+                      seekBar.setProgress(level - minimumBandLevel);
+                      seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                          @Override
+                          public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                              short newLevel = (short) (minimumBandLevel + progress);
+                              value.setText(formatBandLevel(newLevel));
+                              if (equalizer != null) {
+                                  try {
+                                      equalizer.setBandLevel(bandIndex, newLevel);
+                                  } catch (RuntimeException ignored) {
+                                      statusText.setText("This phone rejected that EQ adjustment.");
+                                  }
+                              }
+                          }
+
+                          @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+                          @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+                      });
+                      card.addView(seekBar, matchWrap());
+                      bandsContainer.addView(card, matchWrapWithTop(band == 0 ? 0 : 8));
+                      bandSeekBars[band] = seekBar;
+                      bandValues[band] = value;
+                  }
+              }
+
+              private void togglePlayback() {
+                  if (player == null) {
+                      return;
+                  }
+                  if (player.isPlaying()) {
+                      player.pause();
+                      playButton.setText("PLAY");
+                  } else {
+                      player.start();
+                      playButton.setText("PAUSE");
+                  }
+              }
+
+              private void toggleEqualizer() {
+                  eqEnabled = !eqEnabled;
+                  if (equalizer != null) {
+                      try {
+                          equalizer.setEnabled(eqEnabled);
+                      } catch (RuntimeException ignored) {
+                          eqEnabled = false;
+                      }
+                  }
+                  eqButton.setText(eqEnabled ? "EQ ON" : "EQ OFF");
+                  eqButton.setBackground(rounded(eqEnabled ? GREEN : RED, 9, Color.TRANSPARENT));
+                  statusText.setText(eqEnabled ? "Equalizer active." : "Equalizer bypassed.");
+              }
+
+              private void applyPreset(String preset) {
+                  if (equalizer == null || bandSeekBars.length == 0) {
+                      Toast.makeText(this, "Select music first.", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  float[] pattern;
+                  if ("BASS".equals(preset)) {
+                      pattern = new float[]{0.80f, 0.55f, 0.10f, 0.00f, 0.15f};
+                  } else if ("VOCAL".equals(preset)) {
+                      pattern = new float[]{-0.20f, 0.00f, 0.45f, 0.55f, 0.25f};
+                  } else if ("LIVE".equals(preset)) {
+                      pattern = new float[]{0.45f, 0.15f, -0.10f, 0.35f, 0.55f};
+                  } else if ("BRIGHT".equals(preset)) {
+                      pattern = new float[]{-0.15f, 0.00f, 0.15f, 0.45f, 0.70f};
+                  } else {
+                      pattern = new float[]{0f, 0f, 0f, 0f, 0f};
+                  }
+
+                  int maxMagnitude = Math.min(Math.abs(minimumBandLevel), Math.abs(maximumBandLevel));
+                  for (int band = 0; band < bandSeekBars.length; band++) {
+                      int patternIndex = Math.round((pattern.length - 1) * band / (float) Math.max(1, bandSeekBars.length - 1));
+                      int level = Math.round(pattern[patternIndex] * maxMagnitude);
+                      level = Math.max(minimumBandLevel, Math.min(maximumBandLevel, level));
+                      bandSeekBars[band].setProgress(level - minimumBandLevel);
+                  }
+                  statusText.setText(preset + " preset applied to the real audio session.");
+                  Toast.makeText(this, preset + " preset loaded", Toast.LENGTH_SHORT).show();
+              }
+
+              private void updateProgress() {
+                  if (player == null || userSeeking) {
+                      return;
+                  }
+                  try {
+                      int duration = player.getDuration();
+                      int position = player.getCurrentPosition();
+                      if (duration > 0) {
+                          progressBar.setProgress((int) ((long) position * 1000L / duration));
+                          currentTime.setText(formatTime(position));
+                          totalTime.setText(formatTime(duration));
+                      }
+                  } catch (IllegalStateException ignored) {
+                      // The player is being prepared or released.
+                  }
+              }
+
+              private String getDisplayName(Uri uri) {
+                  String name = "Selected music";
+                  Cursor cursor = null;
+                  try {
+                      cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
+                      if (cursor != null && cursor.moveToFirst()) {
+                          int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                          if (index >= 0) {
+                              String value = cursor.getString(index);
+                              if (value != null && !value.trim().isEmpty()) {
+                                  name = value;
+                              }
+                          }
+                      }
+                  } catch (RuntimeException ignored) {
+                      // Keep the default display name.
+                  } finally {
+                      if (cursor != null) {
+                          cursor.close();
+                      }
+                  }
+                  return name;
+              }
+
+              private void releaseEqualizer() {
+                  if (equalizer != null) {
+                      try {
+                          equalizer.release();
+                      } catch (RuntimeException ignored) {
+                          // Already released by the platform.
+                      }
+                      equalizer = null;
+                  }
+              }
+
+              private void releasePlayerOnly() {
+                  releaseEqualizer();
+                  if (player != null) {
+                      try {
+                          player.reset();
+                          player.release();
+                      } catch (RuntimeException ignored) {
+                          // Player was already released.
+                      }
+                      player = null;
+                  }
+              }
+
+              @Override
+              protected void onDestroy() {
+                  handler.removeCallbacks(progressUpdater);
+                  releasePlayerOnly();
+                  super.onDestroy();
+              }
+
+              private LinearLayout vertical() {
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  return layout;
+              }
+
+              private LinearLayout horizontal() {
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.HORIZONTAL);
+                  return layout;
+              }
+
+              private TextView text(String value, int sizeSp, int color, boolean bold) {
+                  TextView view = new TextView(this);
+                  view.setText(value);
+                  view.setTextSize(sizeSp);
+                  view.setTextColor(color);
+                  if (bold) {
+                      view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  }
+                  return view;
+              }
+
+              private TextView sectionTitle(String value) {
+                  TextView view = text(value, 13, MUTED, true);
+                  view.setPadding(dp(4), dp(7), dp(4), dp(7));
+                  return view;
+              }
+
+              private TextView valueLabel() {
+                  TextView view = text("0.0 dB", 13, Color.WHITE, true);
+                  view.setGravity(Gravity.END);
+                  return view;
+              }
+
+              private View sliderLabelRow(String name, TextView value) {
+                  LinearLayout row = horizontal();
+                  TextView label = text(name, 12, MUTED, true);
+                  row.addView(label, weightedWrap(1f));
+                  row.addView(value, weightedWrap(1f));
+                  return row;
+              }
+
+              private Button button(String label, int backgroundColor) {
+                  Button button = new Button(this);
+                  button.setText(label);
+                  button.setTextColor(Color.WHITE);
+                  button.setTextSize(12);
+                  button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  button.setAllCaps(false);
+                  button.setBackground(rounded(backgroundColor, 9, Color.TRANSPARENT));
+                  return button;
+              }
+
+              private GradientDrawable rounded(int fillColor, int radiusDp, int strokeColor) {
+                  GradientDrawable drawable = new GradientDrawable();
+                  drawable.setColor(fillColor);
+                  drawable.setCornerRadius(dp(radiusDp));
+                  if (strokeColor != Color.TRANSPARENT) {
+                      drawable.setStroke(dp(1), strokeColor);
+                  }
+                  return drawable;
+              }
+
+              private LinearLayout.LayoutParams matchWrap() {
+                  return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+              }
+
+              private LinearLayout.LayoutParams matchWrapWithTop(int topDp) {
+                  LinearLayout.LayoutParams params = matchWrap();
+                  params.setMargins(0, dp(topDp), 0, 0);
+                  return params;
+              }
+
+              private LinearLayout.LayoutParams matchHeightWithTop(int heightDp, int topDp) {
+                  LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(heightDp));
+                  params.setMargins(0, dp(topDp), 0, 0);
+                  return params;
+              }
+
+              private LinearLayout.LayoutParams weightedWrap(float weight) {
+                  return new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight);
+              }
+
+              private LinearLayout.LayoutParams weightedHeight(float weight, int heightDp) {
+                  return new LinearLayout.LayoutParams(0, dp(heightDp), weight);
+              }
+
+              private int dp(int value) {
+                  return Math.round(value * getResources().getDisplayMetrics().density);
+              }
+
+              private String formatBandLevel(short millibels) {
+                  return String.format(Locale.US, "%+.1f dB", millibels / 100f);
+              }
+
+              private String formatFrequency(int frequencyHz) {
+                  if (frequencyHz >= 1000) {
+                      return String.format(Locale.US, "%.1f kHz", frequencyHz / 1000f);
+                  }
+                  return frequencyHz + " Hz";
+              }
+
+              private String formatTime(long milliseconds) {
+                  if (milliseconds < 0) {
+                      milliseconds = 0;
+                  }
+                  long totalSeconds = milliseconds / 1000L;
+                  long minutes = totalSeconds / 60L;
+                  long seconds = totalSeconds % 60L;
+                  return String.format(Locale.US, "%d:%02d", minutes, seconds);
+              }
+          }
+          RCF_EOF
+
+      - name: Build installable APK
+        shell: bash
+        run: |
+          PROJECT_DIR="$RUNNER_TEMP/RCFPhoneMixFinal"
+          set +e
+          gradle --no-daemon --stacktrace -p "$PROJECT_DIR" :app:assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/RCFPhoneMix-build.log"
+          EXIT_CODE=${PIPESTATUS[0]}
+          exit "$EXIT_CODE"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RCFPhoneMix-build-log
+          path: RCFPhoneMix-build.log
+          if-no-files-found: ignore
+
+      - name: Verify and rename APK
+        shell: bash
+        run: |
+          PROJECT_DIR="$RUNNER_TEMP/RCFPhoneMixFinal"
+          test -f "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" RCFPhoneMix.apk
+          sha256sum RCFPhoneMix.apk | tee RCFPhoneMix.sha256
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RCFPhoneMix-FINAL-APK
+          path: |
+            RCFPhoneMix.apk
+            RCFPhoneMix.sha256
+          if-no-files-found: error
