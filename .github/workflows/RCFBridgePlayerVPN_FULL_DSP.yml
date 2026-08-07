@@ -1,0 +1,1746 @@
+name: Build RCF Phone FULL DSP Bridge APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/RCFBridgePlayerVPN.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Create full RCF phone DSP project
+        shell: bash
+        run: |
+          set -euo pipefail
+          P="$RUNNER_TEMP/RCFBridgePlayer"
+          mkdir -p "$P/app/src/main/java/com/rcfbridge/player"
+
+          cat > "$P/settings.gradle" <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "RCFBridgePlayer"
+          include ":app"
+          EOF
+
+          cat > "$P/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.10.1' apply false
+          }
+          EOF
+
+          cat > "$P/gradle.properties" <<'EOF'
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > "$P/app/build.gradle" <<'EOF'
+          plugins { id 'com.android.application' }
+
+          android {
+              namespace 'com.rcfbridge.player'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.rcfbridge.player'
+                  minSdk 23
+                  targetSdk 33
+                  versionCode 4
+                  versionName '4.0-full-dsp'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > "$P/app/src/main/AndroidManifest.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="RCF Phone DSP Bridge"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".BridgeVpnService"
+                      android:exported="false"
+                      android:permission="android.permission.BIND_VPN_SERVICE"
+                      android:foregroundServiceType="mediaPlayback">
+                      <intent-filter>
+                          <action android:name="android.net.VpnService" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > "$P/app/src/main/java/com/rcfbridge/player/MainActivity.java" <<'JAVA'
+          package com.rcfbridge.player;
+          
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.database.Cursor;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.net.Uri;
+          import android.net.VpnService;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.provider.OpenableColumns;
+          import android.view.Gravity;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          
+          public class MainActivity extends Activity {
+              private static final int PICK_AUDIO = 7001;
+              private static final int PREPARE_VPN = 7002;
+          
+              private final Handler handler = new Handler(Looper.getMainLooper());
+              private TextView track;
+              private TextView vpnStatus;
+              private TextView oscStatus;
+              private TextView audioStatus;
+              private TextView logStatus;
+              private Button playButton;
+          
+              private final Runnable statusTick = new Runnable() {
+                  @Override public void run() {
+                      vpnStatus.setText(BridgeVpnService.vpnStatus);
+                      oscStatus.setText(BridgeVpnService.oscStatus);
+                      audioStatus.setText(BridgeVpnService.audioStatus);
+                      logStatus.setText(BridgeVpnService.recentOscLog);
+                      playButton.setText(BridgeVpnService.isPlaying ? "PAUSE" : "PLAY");
+                      handler.postDelayed(this, 250L);
+                  }
+              };
+          
+              @Override protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  buildUi();
+                  handler.post(statusTick);
+              }
+          
+              private void buildUi() {
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setFillViewport(true);
+                  scroll.setBackgroundColor(Color.rgb(7, 11, 16));
+          
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(18), dp(16), dp(18), dp(28));
+          
+                  TextView title = text("RCF PHONE DSP BRIDGE", 22, Color.WHITE, true);
+                  title.setGravity(Gravity.CENTER);
+                  root.addView(title, full());
+          
+                  TextView sub = text("ORIGINAL MIXREMOTE • 31-BAND GEQ • MASTER FX • SEND FX • MULTI FX", 11, Color.rgb(39,164,220), true);
+                  sub.setGravity(Gravity.CENTER);
+                  sub.setPadding(0, dp(4), 0, dp(14));
+                  root.addView(sub, full());
+          
+                  Button bridge = button("START RCF BRIDGE");
+                  bridge.setOnClickListener(v -> prepareVpn());
+                  root.addView(bridge, height(52));
+          
+                  vpnStatus = status("Bridge stopped");
+                  root.addView(vpnStatus, fullTop(8));
+          
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  Button choose = button("SELECT MUSIC");
+                  choose.setOnClickListener(v -> chooseMusic());
+                  row.addView(choose, weight());
+                  playButton = button("PLAY");
+                  playButton.setOnClickListener(v -> sendService(BridgeVpnService.ACTION_TOGGLE, null));
+                  LinearLayout.LayoutParams wp = weight(); wp.setMargins(dp(8), 0, 0, 0);
+                  row.addView(playButton, wp);
+                  root.addView(row, fullTop(14));
+          
+                  track = text("No music selected", 15, Color.WHITE, true);
+                  track.setGravity(Gravity.CENTER);
+                  track.setPadding(dp(6), dp(10), dp(6), dp(8));
+                  root.addView(track, full());
+          
+                  root.addView(heading("RCF CONTROL — LAST REAL CONTROL"), fullTop(8));
+                  oscStatus = status("Waiting for MixRemote controls…");
+                  root.addView(oscStatus, full());
+          
+                  root.addView(heading("PHONE AUDIO"), fullTop(8));
+                  audioStatus = status("Select a song.");
+                  root.addView(audioStatus, full());
+          
+                  root.addView(heading("RECENT COMMANDS — POLLING FILTERED OUT"), fullTop(8));
+                  logStatus = status("No control commands yet.");
+                  logStatus.setGravity(Gravity.LEFT);
+                  logStatus.setTypeface(Typeface.MONOSPACE);
+                  root.addView(logStatus, full());
+          
+                  TextView instructions = text(
+                          "1) START RCF BRIDGE and allow VPN.  2) SELECT MUSIC and PLAY.  3) Open the original RCF MixRemote.  4) Use GEQ, Valve Warmer, Xciter, Maximizer, Send FX, Multi FX, faders or Phones. Every real OSC control is captured; /pl polling no longer hides the command you moved.",
+                          12, Color.LTGRAY, false);
+                  instructions.setPadding(dp(4), dp(18), dp(4), 0);
+                  root.addView(instructions, full());
+          
+                  scroll.addView(root);
+                  setContentView(scroll);
+              }
+          
+              private TextView heading(String s) {
+                  TextView t = text(s, 12, Color.rgb(39,164,220), true);
+                  t.setPadding(0, dp(10), 0, dp(5));
+                  return t;
+              }
+          
+              private void prepareVpn() {
+                  Intent permission = VpnService.prepare(this);
+                  if (permission != null) startActivityForResult(permission, PREPARE_VPN);
+                  else startBridge();
+              }
+          
+              private void startBridge() {
+                  Intent i = new Intent(this, BridgeVpnService.class);
+                  i.setAction(BridgeVpnService.ACTION_START);
+                  if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+              }
+          
+              private void chooseMusic() {
+                  Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                  i.setType("audio/*");
+                  startActivityForResult(i, PICK_AUDIO);
+              }
+          
+              @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode == PREPARE_VPN) {
+                      if (resultCode == RESULT_OK) startBridge();
+                      else Toast.makeText(this, "VPN permission is needed for the original RCF app.", Toast.LENGTH_LONG).show();
+                      return;
+                  }
+                  if (requestCode != PICK_AUDIO || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+                  Uri uri = data.getData();
+                  try {
+                      int flags = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+                      getContentResolver().takePersistableUriPermission(uri, flags);
+                  } catch (Exception ignored) {}
+                  track.setText(displayName(uri));
+                  sendService(BridgeVpnService.ACTION_LOAD, uri);
+              }
+          
+              private void sendService(String action, Uri uri) {
+                  Intent i = new Intent(this, BridgeVpnService.class);
+                  i.setAction(action);
+                  if (uri != null) i.setData(uri);
+                  if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+              }
+          
+              private String displayName(Uri uri) {
+                  Cursor c = null;
+                  try {
+                      c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
+                      if (c != null && c.moveToFirst()) {
+                          int index = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                          if (index >= 0) {
+                              String n = c.getString(index);
+                              if (n != null && !n.isEmpty()) return n;
+                          }
+                      }
+                  } catch (Exception ignored) {
+                  } finally {
+                      if (c != null) c.close();
+                  }
+                  return "Selected music";
+              }
+          
+              @Override protected void onDestroy() {
+                  handler.removeCallbacks(statusTick);
+                  super.onDestroy();
+              }
+          
+              private TextView status(String s) {
+                  TextView v = text(s, 13, Color.LTGRAY, false);
+                  v.setGravity(Gravity.CENTER);
+                  v.setPadding(dp(10), dp(9), dp(10), dp(9));
+                  v.setBackgroundColor(Color.rgb(22, 29, 37));
+                  return v;
+              }
+          
+              private TextView text(String s, int size, int color, boolean bold) {
+                  TextView v = new TextView(this);
+                  v.setText(s);
+                  v.setTextSize(size);
+                  v.setTextColor(color);
+                  if (bold) v.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  return v;
+              }
+          
+              private Button button(String s) {
+                  Button b = new Button(this);
+                  b.setText(s);
+                  b.setTextColor(Color.WHITE);
+                  b.setTextSize(13);
+                  b.setAllCaps(false);
+                  return b;
+              }
+          
+              private LinearLayout.LayoutParams full() { return new LinearLayout.LayoutParams(-1, -2); }
+              private LinearLayout.LayoutParams fullTop(int top) { LinearLayout.LayoutParams p = full(); p.setMargins(0, dp(top), 0, 0); return p; }
+              private LinearLayout.LayoutParams height(int h) { return new LinearLayout.LayoutParams(-1, dp(h)); }
+              private LinearLayout.LayoutParams weight() { return new LinearLayout.LayoutParams(0, dp(52), 1f); }
+              private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
+          }
+          JAVA
+
+          cat > "$P/app/src/main/java/com/rcfbridge/player/BridgeVpnService.java" <<'JAVA'
+          package com.rcfbridge.player;
+          
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.net.VpnService;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.os.ParcelFileDescriptor;
+          
+          import java.io.ByteArrayOutputStream;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.IOException;
+          import java.nio.ByteBuffer;
+          import java.nio.ByteOrder;
+          import java.nio.charset.StandardCharsets;
+          import java.util.ArrayDeque;
+          import java.util.ArrayList;
+          import java.util.LinkedHashMap;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Map;
+          
+          public class BridgeVpnService extends VpnService {
+              public static final String ACTION_START = "com.rcfbridge.player.START";
+              public static final String ACTION_LOAD = "com.rcfbridge.player.LOAD";
+              public static final String ACTION_TOGGLE = "com.rcfbridge.player.TOGGLE";
+          
+              public static volatile String vpnStatus = "Bridge stopped";
+              public static volatile String oscStatus = "Waiting for MixRemote controls…";
+              public static volatile String audioStatus = "Select a song.";
+              public static volatile String recentOscLog = "No control commands yet.";
+              public static volatile boolean isPlaying = false;
+          
+              private static final int NOTIFICATION_ID = 80;
+              private static final String CHANNEL_ID = "rcf_bridge_full_dsp";
+              private static final ArrayDeque<String> RECENT = new ArrayDeque<>();
+          
+              private ParcelFileDescriptor tun;
+              private Thread packetThread;
+              private volatile boolean running;
+              private int packetId = 1;
+          
+              private DspEngine dsp;
+              private PhoneAudioEngine audioEngine;
+              private final Map<String, Float> state = new LinkedHashMap<>();
+          
+              @Override public void onCreate() {
+                  super.onCreate();
+                  dsp = new DspEngine();
+                  audioEngine = new PhoneAudioEngine(this, dsp, (text, playing) -> {
+                      audioStatus = text;
+                      isPlaying = playing;
+                  });
+                  initDefaultState();
+              }
+          
+              @Override public IBinder onBind(Intent intent) { return super.onBind(intent); }
+          
+              @Override public int onStartCommand(Intent intent, int flags, int startId) {
+                  startForegroundNow();
+                  if (intent == null) return START_STICKY;
+                  String action = intent.getAction();
+                  if (ACTION_START.equals(action)) {
+                      startVpn();
+                  } else if (ACTION_LOAD.equals(action) && intent.getData() != null) {
+                      Uri uri = intent.getData();
+                      audioEngine.load(uri);
+                  } else if (ACTION_TOGGLE.equals(action)) {
+                      audioEngine.toggle();
+                      isPlaying = audioEngine.isPlaying();
+                  }
+                  return START_STICKY;
+              }
+          
+              private void startForegroundNow() {
+                  NotificationManager nm = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "RCF DSP Bridge", NotificationManager.IMPORTANCE_LOW);
+                      nm.createNotificationChannel(ch);
+                  }
+                  Intent open = new Intent(this, MainActivity.class);
+                  int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+                  if (Build.VERSION.SDK_INT >= 23) piFlags |= PendingIntent.FLAG_IMMUTABLE;
+                  PendingIntent pi = PendingIntent.getActivity(this, 0, open, piFlags);
+                  Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
+                  b.setSmallIcon(android.R.drawable.ic_media_play)
+                          .setContentTitle("RCF Phone DSP Bridge")
+                          .setContentText("MixRemote controls phone audio DSP")
+                          .setContentIntent(pi)
+                          .setOngoing(true);
+                  startForeground(NOTIFICATION_ID, b.build());
+              }
+          
+              private synchronized void startVpn() {
+                  if (tun != null) {
+                      vpnStatus = "RCF bridge ACTIVE — full OSC capture + DSP";
+                      return;
+                  }
+                  try {
+                      Builder b = new Builder()
+                              .setSession("RCF M18 Phone DSP Bridge")
+                              .setMtu(1500)
+                              .addAddress("10.77.0.1", 32)
+                              .addRoute("0.0.0.0", 0);
+          
+                      try {
+                          b.addAllowedApplication("com.rcf.mixremote");
+                      } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+                          vpnStatus = "Install the ORIGINAL RCF MixRemote first, then START RCF BRIDGE.";
+                          return;
+                      }
+          
+                      if (Build.VERSION.SDK_INT >= 21) b.setBlocking(true);
+                      tun = b.establish();
+                      if (tun == null) {
+                          vpnStatus = "Bridge could not start — VPN permission missing";
+                          return;
+                      }
+                      running = true;
+                      packetThread = new Thread(this::packetLoop, "RCF-VPN-PACKET");
+                      packetThread.start();
+                      vpnStatus = "RCF bridge ACTIVE — open original MixRemote";
+                  } catch (Exception e) {
+                      vpnStatus = "Bridge error: " + safe(e.getMessage());
+                  }
+              }
+          
+              private void packetLoop() {
+                  try (FileInputStream in = new FileInputStream(tun.getFileDescriptor());
+                       FileOutputStream out = new FileOutputStream(tun.getFileDescriptor())) {
+                      byte[] buf = new byte[32767];
+                      while (running) {
+                          int n = in.read(buf);
+                          if (n <= 0) continue;
+                          handleIpPacket(buf, n, out);
+                      }
+                  } catch (Exception e) {
+                      if (running) vpnStatus = "Bridge packet error: " + safe(e.getMessage());
+                  }
+              }
+          
+              private void handleIpPacket(byte[] packet, int len, FileOutputStream out) throws IOException {
+                  if (len < 28) return;
+                  int version = (packet[0] >> 4) & 0x0F;
+                  if (version != 4) return;
+                  int ihl = (packet[0] & 0x0F) * 4;
+                  if (ihl < 20 || len < ihl + 8) return;
+                  if ((packet[9] & 0xFF) != 17) return; // UDP
+          
+                  int srcPort = u16(packet, ihl);
+                  int dstPort = u16(packet, ihl + 2);
+                  int udpLength = u16(packet, ihl + 4);
+                  int payloadOffset = ihl + 8;
+                  int payloadLength = Math.min(Math.max(0, udpLength - 8), len - payloadOffset);
+                  if (payloadLength <= 0) return;
+          
+                  byte[] srcIp = new byte[]{packet[12], packet[13], packet[14], packet[15]};
+                  byte[] dstIp = new byte[]{packet[16], packet[17], packet[18], packet[19]};
+          
+                  List<OscMessage> messages = new ArrayList<>();
+                  parseOsc(packet, payloadOffset, payloadLength, messages);
+                  for (OscMessage m : messages) {
+                      onOsc(m);
+                      byte[] reply = createReply(m);
+                      if (reply != null) {
+                          // Reply from the packet's destination endpoint back to its actual source endpoint.
+                          byte[] ipReply = buildUdpIpv4(dstIp, srcIp, dstPort, srcPort, reply);
+                          out.write(ipReply);
+                          out.flush();
+                      }
+                  }
+              }
+          
+              private void onOsc(OscMessage m) {
+                  boolean noise = isPollingNoise(m.address);
+                  String valueText = valueText(m);
+          
+                  if (!noise) {
+                      String line = m.address + valueText;
+                      oscStatus = "RCF → phone: " + line;
+                      appendRecent(line);
+                  }
+          
+                  if (m.firstFloat != null) {
+                      float v = m.firstFloat;
+                      if (!isProtocolOnly(m.address)) state.put(m.address, v);
+                      String mapped = dsp.handleOsc(m.address, v);
+                      if (mapped != null) audioStatus = mapped;
+                  }
+              }
+          
+              private static boolean isPollingNoise(String address) {
+                  return address != null && (address.contains("/pl_") || address.contains("/vmeter_") || address.contains("/vm_"));
+              }
+          
+              private static boolean isProtocolOnly(String address) {
+                  return address == null || address.contains("/pl_") || address.contains("/up_") || address.contains("/vmeter_") || address.contains("/vm_");
+              }
+          
+              private static String valueText(OscMessage m) {
+                  if (m.firstFloat != null) return "  " + String.format(Locale.US, "%.4f", m.firstFloat);
+                  if (m.firstString != null) return "  \"" + m.firstString + "\"";
+                  return "";
+              }
+          
+              private static synchronized void appendRecent(String line) {
+                  if (line == null || line.isEmpty()) return;
+                  RECENT.addFirst(line);
+                  while (RECENT.size() > 10) RECENT.removeLast();
+                  StringBuilder b = new StringBuilder();
+                  for (String s : RECENT) {
+                      if (b.length() > 0) b.append('\n');
+                      b.append(s);
+                  }
+                  recentOscLog = b.toString();
+              }
+          
+              private byte[] createReply(OscMessage m) {
+                  // Identity / firmware replies used by the original app during startup.
+                  if ("/22/00/gb_100".equals(m.address)) return oscStringReply(m.address, "02.10.0225");
+                  if ("/22/00/gb_146".equals(m.address)) return oscStringReply(m.address, "0");
+                  if ("/22/00/gb_275".equals(m.address)) return oscStringReply(m.address, "RCFBRIDGE001");
+                  if ("/27/00/gb_078".equals(m.address) || "/27/00/gb_78".equals(m.address)) return oscStringReply(m.address, "");
+          
+                  // MixRemote polling: return a quiet 41-channel meter frame, but do not let polling hide real controls in the UI.
+                  if ("/00/00/pl_000".equals(m.address)) return oscMeterReply();
+          
+                  // When MixRemote requests a page/channel refresh, return all locally stored values for that page/channel.
+                  AddressParts p = AddressParts.parse(m.address);
+                  if (p != null && "up".equals(p.section)) {
+                      byte[] bundle = stateBundleFor(p.page, p.channel);
+                      if (bundle != null) return bundle;
+                  }
+          
+                  // Echo control/state writes as acknowledgement. This keeps the original MixRemote controls visually synchronized.
+                  if (m.firstFloat != null && !isProtocolOnly(m.address)) return oscFloatReply(m.address, m.firstFloat);
+                  if (m.firstString != null && !isProtocolOnly(m.address)) return oscStringReply(m.address, m.firstString);
+                  return null;
+              }
+          
+              private byte[] stateBundleFor(int page, int channel) {
+                  String prefix = String.format(Locale.US, "/%02d/%02d/", page, channel);
+                  List<byte[]> entries = new ArrayList<>();
+                  for (Map.Entry<String, Float> e : state.entrySet()) {
+                      if (e.getKey().startsWith(prefix)) entries.add(oscFloatReply(e.getKey(), e.getValue()));
+                  }
+                  if (entries.isEmpty()) return null;
+                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                  writeOscString(out, "#bundle");
+                  writeInt(out, 0); writeInt(out, 1); // immediate timetag
+                  for (byte[] msg : entries) {
+                      writeInt(out, msg.length);
+                      out.write(msg, 0, msg.length);
+                  }
+                  return out.toByteArray();
+              }
+          
+              private void initDefaultState() {
+                  state.clear();
+                  put(0,0,"fd",0,1f);
+                  put(0,0,"mt",0,0f);
+                  put(0,0,"gq",0,1f);
+                  for (int i=1;i<=31;i++) put(0,0,"gq",i,0.5f);
+                  put(0,0,"tw",0,0f); put(0,0,"tw",1,0.25f); put(0,0,"tw",2,1f);
+                  put(0,0,"ex",0,0f); put(0,0,"ex",1,0.5f); put(0,0,"ex",2,0.5f);
+                  put(0,0,"mx",0,0f); put(0,0,"mx",1,0f); put(0,0,"mx",2,1f);
+          
+                  for (int ch=0; ch<=5; ch++) {
+                      put(11,ch,"fx",0,0f);
+                      for (int c=1;c<=6;c++) put(11,ch,"fx",c,0.5f);
+                      put(11,ch,"fx",7,0f);
+                  }
+          
+                  for (int page=28; page<=31; page++) {
+                      put(page,0,"fx",0,0f);
+                      for (int ch=1; ch<=5; ch++) {
+                          put(page,ch,"fx",0,0f);
+                          for (int c=1;c<=18;c++) put(page,ch,"fx",c,0.5f);
+                          put(page,ch,"fx",7,0f);
+                      }
+                      put(page,6,"fx",0,0f);
+                  }
+          
+                  put(13,0,"fd",0,1f);
+                  put(22,0,"gb",70,0f);
+                  put(22,0,"gb",79,0f);
+              }
+          
+              private void put(int page, int channel, String section, int control, float value) {
+                  state.put(String.format(Locale.US, "/%02d/%02d/%s_%03d", page, channel, section, control), value);
+              }
+          
+              private byte[] oscStringReply(String address, String value) {
+                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                  writeOscString(out, address);
+                  writeOscString(out, ",s");
+                  writeOscString(out, value == null ? "" : value);
+                  return out.toByteArray();
+              }
+          
+              private byte[] oscFloatReply(String address, float value) {
+                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                  writeOscString(out, address);
+                  writeOscString(out, ",f");
+                  writeInt(out, Float.floatToIntBits(value));
+                  return out.toByteArray();
+              }
+          
+              private byte[] oscMeterReply() {
+                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                  writeOscString(out, "/00/00/vmeter_000");
+                  StringBuilder tags = new StringBuilder(",");
+                  for (int i = 0; i < 41; i++) tags.append('f');
+                  writeOscString(out, tags.toString());
+                  for (int i = 0; i < 41; i++) writeInt(out, Float.floatToIntBits(0f));
+                  return out.toByteArray();
+              }
+          
+              private void parseOsc(byte[] data, int off, int len, List<OscMessage> out) {
+                  if (len <= 0 || off < 0 || off + len > data.length) return;
+                  if (len >= 16 && starts(data, off, "#bundle")) {
+                      int pos = off + 16;
+                      int end = off + len;
+                      while (pos + 4 <= end) {
+                          int size = readInt(data, pos); pos += 4;
+                          if (size <= 0 || pos + size > end) break;
+                          parseOsc(data, pos, size, out);
+                          pos += size;
+                      }
+                      return;
+                  }
+          
+                  OscString address = readOscString(data, off, off + len);
+                  if (address == null || !address.value.startsWith("/")) return;
+                  OscString tags = readOscString(data, address.next, off + len);
+                  if (tags == null || !tags.value.startsWith(",")) return;
+                  int pos = tags.next;
+                  Float firstFloat = null;
+                  String firstString = null;
+          
+                  for (int i = 1; i < tags.value.length(); i++) {
+                      char t = tags.value.charAt(i);
+                      if (t == 'f' && pos + 4 <= off + len) {
+                          float f = Float.intBitsToFloat(readInt(data, pos));
+                          if (firstFloat == null) firstFloat = f;
+                          pos += 4;
+                      } else if (t == 'i' && pos + 4 <= off + len) {
+                          int iv = readInt(data, pos);
+                          if (firstFloat == null) firstFloat = (float)iv;
+                          pos += 4;
+                      } else if (t == 'd' && pos + 8 <= off + len) {
+                          double dv = ByteBuffer.wrap(data, pos, 8).order(ByteOrder.BIG_ENDIAN).getDouble();
+                          if (firstFloat == null) firstFloat = (float)dv;
+                          pos += 8;
+                      } else if (t == 'h' && pos + 8 <= off + len) {
+                          long lv = ByteBuffer.wrap(data, pos, 8).order(ByteOrder.BIG_ENDIAN).getLong();
+                          if (firstFloat == null) firstFloat = (float)lv;
+                          pos += 8;
+                      } else if (t == 's') {
+                          OscString s = readOscString(data, pos, off + len);
+                          if (s == null) return;
+                          if (firstString == null) firstString = s.value;
+                          pos = s.next;
+                      } else if (t == 'T') {
+                          if (firstFloat == null) firstFloat = 1f;
+                      } else if (t == 'F') {
+                          if (firstFloat == null) firstFloat = 0f;
+                      } else if (t == 'b' && pos + 4 <= off + len) {
+                          int n = readInt(data, pos); pos += 4;
+                          if (n < 0 || pos + n > off + len) return;
+                          pos = (pos + n + 3) & ~3;
+                      } else {
+                          // Unknown OSC atom: keep the packet visible in the raw log rather than crashing the bridge.
+                          break;
+                      }
+                  }
+                  out.add(new OscMessage(address.value, firstFloat, firstString));
+              }
+          
+              private byte[] buildUdpIpv4(byte[] src, byte[] dst, int srcPort, int dstPort, byte[] payload) {
+                  int total = 20 + 8 + payload.length;
+                  byte[] p = new byte[total];
+                  p[0] = 0x45;
+                  p[1] = 0;
+                  put16(p, 2, total);
+                  put16(p, 4, packetId++ & 0xFFFF);
+                  put16(p, 6, 0);
+                  p[8] = 64;
+                  p[9] = 17;
+                  System.arraycopy(src, 0, p, 12, 4);
+                  System.arraycopy(dst, 0, p, 16, 4);
+                  put16(p, 20, srcPort);
+                  put16(p, 22, dstPort);
+                  put16(p, 24, 8 + payload.length);
+                  put16(p, 26, 0); // IPv4 UDP checksum optional.
+                  System.arraycopy(payload, 0, p, 28, payload.length);
+                  put16(p, 10, ipChecksum(p, 0, 20));
+                  return p;
+              }
+          
+              private int ipChecksum(byte[] b, int off, int len) {
+                  long sum = 0;
+                  for (int i = off; i < off + len; i += 2) {
+                      int word = (b[i] & 0xFF) << 8;
+                      if (i + 1 < off + len) word |= b[i + 1] & 0xFF;
+                      sum += word;
+                      while ((sum & 0xFFFF0000L) != 0) sum = (sum & 0xFFFFL) + (sum >>> 16);
+                  }
+                  return (int)(~sum) & 0xFFFF;
+              }
+          
+              @Override public void onDestroy() {
+                  running = false;
+                  if (tun != null) {
+                      try { tun.close(); } catch (Exception ignored) {}
+                      tun = null;
+                  }
+                  if (audioEngine != null) audioEngine.release();
+                  vpnStatus = "Bridge stopped";
+                  stopForeground(true);
+                  super.onDestroy();
+              }
+          
+              private static int u16(byte[] b, int p) { return ((b[p] & 0xFF) << 8) | (b[p + 1] & 0xFF); }
+              private static void put16(byte[] b, int p, int v) { b[p] = (byte)((v >>> 8) & 0xFF); b[p + 1] = (byte)(v & 0xFF); }
+              private static int readInt(byte[] b, int p) { return ByteBuffer.wrap(b, p, 4).order(ByteOrder.BIG_ENDIAN).getInt(); }
+          
+              private static void writeInt(ByteArrayOutputStream out, int v) {
+                  out.write((v >>> 24) & 0xFF); out.write((v >>> 16) & 0xFF); out.write((v >>> 8) & 0xFF); out.write(v & 0xFF);
+              }
+          
+              private static void writeOscString(ByteArrayOutputStream out, String s) {
+                  byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+                  out.write(bytes, 0, bytes.length); out.write(0);
+                  while ((out.size() & 3) != 0) out.write(0);
+              }
+          
+              private static OscString readOscString(byte[] b, int pos, int end) {
+                  if (pos < 0 || pos >= end) return null;
+                  int z = pos;
+                  while (z < end && b[z] != 0) z++;
+                  if (z >= end) return null;
+                  String s = new String(b, pos, z - pos, StandardCharsets.UTF_8);
+                  int next = (z + 4) & ~3;
+                  if (next > end) return null;
+                  return new OscString(s, next);
+              }
+          
+              private static boolean starts(byte[] b, int off, String s) {
+                  byte[] x = s.getBytes(StandardCharsets.US_ASCII);
+                  if (off + x.length > b.length) return false;
+                  for (int i = 0; i < x.length; i++) if (b[off + i] != x[i]) return false;
+                  return true;
+              }
+          
+              private static String safe(String s) { return s == null ? "unknown" : s; }
+          
+              private static final class OscString {
+                  final String value; final int next;
+                  OscString(String value, int next) { this.value = value; this.next = next; }
+              }
+          
+              private static final class OscMessage {
+                  final String address; final Float firstFloat; final String firstString;
+                  OscMessage(String address, Float firstFloat, String firstString) { this.address = address; this.firstFloat = firstFloat; this.firstString = firstString; }
+              }
+          
+              private static final class AddressParts {
+                  final int page, channel; final String section;
+                  AddressParts(int page, int channel, String section) { this.page = page; this.channel = channel; this.section = section; }
+                  static AddressParts parse(String a) {
+                      if (a == null || a.length() < 10 || a.charAt(0) != '/') return null;
+                      try {
+                          String[] p = a.split("/");
+                          if (p.length < 4) return null;
+                          int page = Integer.parseInt(p[1]); int channel = Integer.parseInt(p[2]);
+                          String sec = p[3]; int u = sec.indexOf('_'); if (u >= 0) sec = sec.substring(0, u);
+                          return new AddressParts(page, channel, sec.toLowerCase(Locale.US));
+                      } catch (Exception e) { return null; }
+                  }
+              }
+          }
+          JAVA
+
+          cat > "$P/app/src/main/java/com/rcfbridge/player/DspEngine.java" <<'JAVA'
+          package com.rcfbridge.player;
+          
+          import java.util.Locale;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
+          
+          /**
+           * Pure-Java DSP engine driven by the original RCF M18 MixRemote OSC layout.
+           * It intentionally has no Android dependencies so it can be unit-compiled separately.
+           */
+          public final class DspEngine {
+              private static final Pattern OSC = Pattern.compile("^/(\\d{2})/(\\d{2})/([A-Za-z]+)_(\\d{3})$");
+              private static final double[] GEQ_FREQ = {
+                      20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630,
+                      800, 1000, 1250, 1600, 2000, 2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500, 16000, 20000
+              };
+          
+              private int sampleRate = 44100;
+              private int channels = 2;
+          
+              private boolean geqEnabled = true;
+              private final float[] geqDb = new float[31];
+              private final Biquad[][] geq = new Biquad[2][31];
+          
+              private boolean masterProcessorOn = true;
+              private boolean valveOn;
+              private float valveDrive;
+              private boolean xciterOn;
+              private float xciterFocus = 0.5f;
+              private float xciterProcess = 0.5f;
+              private final OnePoleLow[] xciterLow = {new OnePoleLow(), new OnePoleLow()};
+          
+              private boolean maximizerOn;
+              private float maximizerBoost;
+              private float maximizerCeiling = 1.0f;
+          
+              private float mainGain = 1f;
+              private float phonesGain = 1f;
+              private boolean mainMute;
+              private boolean pfl;
+              private int phonesMode;
+          
+              private final ReverbFx sendReverb = new ReverbFx();
+              private final DelayFx sendDelay1 = new DelayFx();
+              private final DelayFx sendDelay2 = new DelayFx();
+              private final ChorusFx sendChorus = new ChorusFx();
+              private final ChorusFx sendTremolo = new ChorusFx();
+              private final ChorusFx sendPitch = new ChorusFx();
+              private final MultiFxChain[] mfx = {
+                      new MultiFxChain(), new MultiFxChain(), new MultiFxChain(), new MultiFxChain()
+              };
+          
+              public DspEngine() {
+                  for (int ch = 0; ch < 2; ch++) {
+                      for (int i = 0; i < 31; i++) geq[ch][i] = new Biquad();
+                  }
+                  configure(sampleRate, channels);
+              }
+          
+              public synchronized void configure(int sr, int ch) {
+                  if (sr < 8000) sr = 44100;
+                  sampleRate = sr;
+                  channels = Math.max(1, Math.min(2, ch));
+                  for (int c = 0; c < 2; c++) {
+                      for (int i = 0; i < 31; i++) {
+                          geq[c][i].setPeaking(sampleRate, GEQ_FREQ[i], 4.318, geqDb[i]);
+                      }
+                  }
+                  updateXciterFilter();
+                  sendReverb.configure(sampleRate);
+                  sendDelay1.configure(sampleRate);
+                  sendDelay2.configure(sampleRate);
+                  sendChorus.configure(sampleRate);
+                  sendTremolo.configure(sampleRate);
+                  sendPitch.configure(sampleRate);
+                  for (MultiFxChain f : mfx) f.configure(sampleRate);
+              }
+          
+              public synchronized void reset() {
+                  for (int c = 0; c < 2; c++) {
+                      for (Biquad b : geq[c]) b.reset();
+                      xciterLow[c].reset();
+                  }
+                  sendReverb.reset();
+                  sendDelay1.reset();
+                  sendDelay2.reset();
+                  sendChorus.reset();
+                  sendTremolo.reset();
+                  sendPitch.reset();
+                  for (MultiFxChain f : mfx) f.reset();
+              }
+          
+              /** Process interleaved 16-bit PCM in place. */
+              public synchronized void process(short[] pcm, int sampleCount, int inChannels) {
+                  if (pcm == null || sampleCount <= 0) return;
+                  int chs = Math.max(1, Math.min(2, inChannels));
+                  int frames = sampleCount / chs;
+                  int p = 0;
+                  // Reuse the same stereo work buffers for the whole PCM block.
+                  // Allocating arrays per sample causes severe GC pressure on Android audio threads.
+                  float[] s = new float[2];
+                  float[] wet = new float[2];
+                  for (int frame = 0; frame < frames; frame++) {
+                      float l = pcm[p] / 32768f;
+                      float r = chs == 2 ? pcm[p + 1] / 32768f : l;
+          
+                      if (geqEnabled) {
+                          for (int b = 0; b < 31; b++) {
+                              if (Math.abs(geqDb[b]) > 0.01f) {
+                                  l = geq[0][b].process(l);
+                                  r = geq[1][b].process(r);
+                              }
+                          }
+                      }
+          
+                      if (masterProcessorOn && valveOn) {
+                          float drive = 1f + valveDrive * 10f;
+                          l = softSat(l, drive);
+                          r = softSat(r, drive);
+                      }
+          
+                      if (masterProcessorOn && xciterOn) {
+                          float lowL = xciterLow[0].process(l);
+                          float lowR = xciterLow[1].process(r);
+                          float hiL = l - lowL;
+                          float hiR = r - lowR;
+                          float amt = xciterProcess * 0.75f;
+                          l += (softSat(hiL, 4f) - hiL) * amt;
+                          r += (softSat(hiR, 4f) - hiR) * amt;
+                      }
+          
+                      s[0] = l; s[1] = r;
+                      for (MultiFxChain f : mfx) f.process(s);
+                      l = s[0]; r = s[1];
+          
+                      // Send effects are additive wet returns.
+                      wet[0] = l; wet[1] = r;
+                      sendReverb.processWet(wet);
+                      sendDelay1.processWet(wet);
+                      sendDelay2.processWet(wet);
+                      sendChorus.processWet(wet);
+                      sendTremolo.processWet(wet);
+                      sendPitch.processWet(wet);
+                      l = wet[0]; r = wet[1];
+          
+                      float gain = mainGain * phonesGain;
+                      if (mainMute) gain = 0f;
+                      l *= gain;
+                      r *= gain;
+          
+                      if (masterProcessorOn && maximizerOn) {
+                          float boost = dbToAmp(maximizerBoost);
+                          l = limiter(l * boost, maximizerCeiling);
+                          r = limiter(r * boost, maximizerCeiling);
+                      }
+          
+                      pcm[p] = toShort(l);
+                      if (chs == 2) pcm[p + 1] = toShort(r);
+                      p += chs;
+                  }
+              }
+          
+              /**
+               * Apply one OSC control value. Returns a compact human-readable mapping result.
+               * Values from MixRemote are normally 0..1 floats, but direct dB-like values are also tolerated.
+               */
+              public synchronized String handleOsc(String address, float value) {
+                  Matcher m = OSC.matcher(address == null ? "" : address);
+                  if (!m.matches()) return null;
+                  int page = parseInt(m.group(1));
+                  int channel = parseInt(m.group(2));
+                  String section = m.group(3).toLowerCase(Locale.US);
+                  int control = parseInt(m.group(4));
+          
+                  // Main output / master processing.
+                  if (page == 0) {
+                      if ("gq".equals(section)) return handleGraphicEq(control, value);
+                      if ("tw".equals(section)) {
+                          if (control == 0) { valveOn = on(value); return "Valve Warmer " + boolText(valveOn); }
+                          if (control == 1) { valveDrive = norm(value); return pct("Valve drive", valveDrive); }
+                          if (control == 2) { masterProcessorOn = on(value); return "Master processor " + boolText(masterProcessorOn); }
+                      }
+                      if ("ex".equals(section)) {
+                          if (control == 0) { xciterOn = on(value); return "Xciter " + boolText(xciterOn); }
+                          if (control == 1) { xciterFocus = norm(value); updateXciterFilter(); return pct("Xciter focus", xciterFocus); }
+                          if (control == 2) { xciterProcess = norm(value); return pct("Xciter process", xciterProcess); }
+                      }
+                      if ("mx".equals(section)) {
+                          if (control == 0) { maximizerOn = on(value); return "Maximizer " + boolText(maximizerOn); }
+                          if (control == 1) { maximizerBoost = norm(value) * 12f; return db("Maximizer boost", maximizerBoost); }
+                          if (control == 2) {
+                              float db = -12f + norm(value) * 12f;
+                              maximizerCeiling = dbToAmp(db);
+                              return db("Maximizer ceiling", db);
+                          }
+                      }
+                      if ("fd".equals(section) && control == 0) {
+                          mainGain = norm(value);
+                          return pct("Main fader", mainGain);
+                      }
+                      if ("mt".equals(section) && control == 0) {
+                          mainMute = on(value);
+                          return "Main mute " + boolText(mainMute);
+                      }
+                      if ("eq".equals(section)) return handleParamEq(control, value);
+                  }
+          
+                  // SEND page: channel 0 reverb, 1 delay1, 2 delay2, 3 chorus/flanger, 4 tremolo, 5 pitch shifter.
+                  if (page == 11 && "fx".equals(section)) {
+                      switch (channel) {
+                          case 0: return sendReverb.handle(control, value, "Send Reverb");
+                          case 1: return sendDelay1.handle(control, value, "Delay 1");
+                          case 2: return sendDelay2.handle(control, value, "Delay 2");
+                          case 3: return sendChorus.handle(control, value, "Chorus/Flanger");
+                          case 4: return sendTremolo.handleTremolo(control, value, "Tremolo");
+                          case 5: return sendPitch.handlePitch(control, value, "Pitch FX");
+                          case 7: return "Send FX type " + Math.round(discrete(value, 4));
+                          default: return "Send FX ch " + channel + " ctrl " + control;
+                      }
+                  }
+          
+                  // Multi-FX pages MFX1..MFX4. Channels: 0 order, 1 DEL, 2 MOD, 3 FX, 4 OD, 5 AMP, 6 boost.
+                  if (page >= 28 && page <= 31 && "fx".equals(section)) {
+                      return mfx[page - 28].handle(channel, control, value, "MFX" + (page - 27));
+                  }
+          
+                  // Phones page.
+                  if (page == 13 && "fd".equals(section) && control == 0) {
+                      phonesGain = norm(value);
+                      return pct("Phones fader", phonesGain);
+                  }
+          
+                  // Global settings page: phones mode and PFL.
+                  if (page == 22 && "gb".equals(section)) {
+                      if (control == 70) {
+                          phonesMode = Math.round(discrete(value, 3));
+                          return "Phones mode " + phonesMode;
+                      }
+                      if (control == 79) {
+                          pfl = on(value);
+                          return "PFL " + boolText(pfl);
+                      }
+                  }
+          
+                  return null;
+              }
+          
+              private String handleGraphicEq(int control, float value) {
+                  if (control == 0) {
+                      geqEnabled = on(value);
+                      return "31-band GEQ " + boolText(geqEnabled);
+                  }
+                  if (control < 1 || control > 31) return null;
+                  int i = control - 1;
+                  float db = toBipolarDb(value, 12f);
+                  geqDb[i] = db;
+                  for (int c = 0; c < 2; c++) geq[c][i].setPeaking(sampleRate, GEQ_FREQ[i], 4.318, db);
+                  return String.format(Locale.US, "GEQ %.1f Hz %+.1f dB", GEQ_FREQ[i], db);
+              }
+          
+              private String handleParamEq(int control, float value) {
+                  // Preserve compatibility with the original four-band channel EQ controls.
+                  int slot = -1;
+                  if (control == 3) slot = 0;
+                  else if (control == 7) slot = 1;
+                  else if (control == 10) slot = 2;
+                  else if (control == 13) slot = 3;
+                  if (control == 2) { geqEnabled = on(value); return "EQ " + boolText(geqEnabled); }
+                  if (slot >= 0) {
+                      int idx = Math.round(slot * 30f / 3f);
+                      float db = toBipolarDb(value, 12f);
+                      geqDb[idx] = db;
+                      for (int c = 0; c < 2; c++) geq[c][idx].setPeaking(sampleRate, GEQ_FREQ[idx], 1.2, db);
+                      return String.format(Locale.US, "Param EQ %+.1f dB", db);
+                  }
+                  return null;
+              }
+          
+              private void updateXciterFilter() {
+                  double freq = 900.0 * Math.pow(14.0, xciterFocus);
+                  for (OnePoleLow f : xciterLow) f.set(sampleRate, freq);
+              }
+          
+              private static short toShort(float x) {
+                  x = clamp(x, -1f, 1f);
+                  return (short)Math.round(x * 32767f);
+              }
+          
+              private static float softSat(float x, float drive) {
+                  double d = Math.max(1.0, drive);
+                  double norm = Math.tanh(d);
+                  return (float)(Math.tanh(x * d) / (norm == 0 ? 1 : norm));
+              }
+          
+              private static float limiter(float x, float ceiling) {
+                  ceiling = clamp(ceiling, 0.05f, 1f);
+                  float y = softSat(x / ceiling, 2.2f) * ceiling;
+                  return clamp(y, -ceiling, ceiling);
+              }
+          
+              private static float norm(float v) {
+                  if (Float.isNaN(v) || Float.isInfinite(v)) return 0f;
+                  if (v >= 0f && v <= 1f) return v;
+                  if (v >= -1f && v <= 1f) return (v + 1f) * 0.5f;
+                  return clamp(v / 100f, 0f, 1f);
+              }
+          
+              private static float discrete(float v, int maxIndex) {
+                  if (v >= 0f && v <= 1f) return v * maxIndex;
+                  return clamp(v, 0f, maxIndex);
+              }
+          
+              private static boolean on(float v) { return v >= 0.5f; }
+          
+              private static float toBipolarDb(float v, float maxDb) {
+                  if (v >= 0f && v <= 1f) return (v - 0.5f) * 2f * maxDb;
+                  return clamp(v, -maxDb, maxDb);
+              }
+          
+              private static int parseInt(String s) {
+                  try { return Integer.parseInt(s); } catch (Exception e) { return 0; }
+              }
+          
+              private static float clamp(float v, float lo, float hi) { return Math.max(lo, Math.min(hi, v)); }
+              private static float dbToAmp(float db) { return (float)Math.pow(10.0, db / 20.0); }
+              private static String boolText(boolean b) { return b ? "ON" : "OFF"; }
+              private static String pct(String name, float v) { return name + " " + Math.round(v * 100f) + "%"; }
+              private static String db(String name, float v) { return String.format(Locale.US, "%s %+.1f dB", name, v); }
+          
+              private static final class Biquad {
+                  private double b0 = 1, b1, b2, a1, a2;
+                  private double z1, z2;
+          
+                  void reset() { z1 = z2 = 0; }
+          
+                  void setPeaking(double fs, double freq, double q, double gainDb) {
+                      freq = Math.max(10.0, Math.min(freq, fs * 0.45));
+                      double A = Math.pow(10.0, gainDb / 40.0);
+                      double w0 = 2.0 * Math.PI * freq / fs;
+                      double alpha = Math.sin(w0) / (2.0 * Math.max(0.1, q));
+                      double cos = Math.cos(w0);
+                      double nb0 = 1.0 + alpha * A;
+                      double nb1 = -2.0 * cos;
+                      double nb2 = 1.0 - alpha * A;
+                      double na0 = 1.0 + alpha / A;
+                      double na1 = -2.0 * cos;
+                      double na2 = 1.0 - alpha / A;
+                      b0 = nb0 / na0; b1 = nb1 / na0; b2 = nb2 / na0; a1 = na1 / na0; a2 = na2 / na0;
+                  }
+          
+                  float process(float x) {
+                      double y = b0 * x + z1;
+                      z1 = b1 * x - a1 * y + z2;
+                      z2 = b2 * x - a2 * y;
+                      return (float)y;
+                  }
+              }
+          
+              private static final class OnePoleLow {
+                  private float a = 0.1f;
+                  private float y;
+                  void set(int fs, double freq) {
+                      freq = Math.max(20, Math.min(freq, fs * 0.45));
+                      a = (float)(1.0 - Math.exp(-2.0 * Math.PI * freq / fs));
+                  }
+                  float process(float x) { y += a * (x - y); return y; }
+                  void reset() { y = 0; }
+              }
+          
+              private static final class DelayFx {
+                  private int sampleRate = 44100;
+                  private float[] l = new float[88200], r = new float[88200];
+                  private int pos;
+                  private boolean on;
+                  private float time = 0.33f;
+                  private float feedback = 0.28f;
+                  private float wet = 0.25f;
+                  private float width = 0.5f;
+                  private int type;
+                  private float lpL, lpR;
+                  private float tone = 0.75f;
+          
+                  void configure(int sr) {
+                      sampleRate = sr;
+                      int n = Math.max(4096, sr * 3);
+                      l = new float[n]; r = new float[n]; pos = 0;
+                  }
+                  void reset() { java.util.Arrays.fill(l, 0); java.util.Arrays.fill(r, 0); pos = 0; lpL = lpR = 0; }
+          
+                  String handle(int c, float v, String name) {
+                      if (c == 0) { on = on(v); return name + " " + boolText(on); }
+                      if (c == 1) { time = 0.02f + norm(v) * 1.98f; return String.format(Locale.US, "%s time %.0f ms", name, time * 1000f); }
+                      if (c == 2) { feedback = norm(v) * 0.92f; return pct(name + " feedback", feedback); }
+                      if (c == 3 || c == 4) { tone = 0.08f + norm(v) * 0.9f; return pct(name + " filter", tone); }
+                      if (c == 5) { width = norm(v); return pct(name + " width", width); }
+                      if (c == 6) { wet = norm(v); return pct(name + " level", wet); }
+                      if (c == 7) { type = Math.round(discrete(v, 4)); return name + " mode " + type; }
+                      return name + " ctrl " + c;
+                  }
+          
+                  void processWet(float[] s) {
+                      if (!on) return;
+                      float inL = s[0], inR = s[1];
+                      float modeTime = type == 4 ? time * 0.28f : time;
+                      int dL = Math.max(1, Math.min(l.length - 1, Math.round(modeTime * sampleRate)));
+                      int dR = type == 3
+                              ? Math.max(1, Math.min(r.length - 1, Math.round(modeTime * sampleRate * 0.72f)))
+                              : dL;
+                      int readL = pos - dL; if (readL < 0) readL += l.length;
+                      int readR = pos - dR; if (readR < 0) readR += r.length;
+                      float dl = l[readL], dr = r[readR];
+                      float modeTone = type == 1 ? tone * 0.35f : type == 2 ? Math.min(1f, tone * 1.25f) : tone;
+                      lpL += modeTone * (dl - lpL); lpR += modeTone * (dr - lpR);
+                      float cross = type == 0 ? width * 0.5f : type == 3 ? 0.35f + width * 0.45f : width * 0.2f;
+                      float modeFeedback = feedback * (type == 4 ? 0.32f : type == 1 ? 0.86f : 1f);
+                      float fbL = lpL * (1f - cross) + lpR * cross;
+                      float fbR = lpR * (1f - cross) + lpL * cross;
+                      l[pos] = inL + fbL * modeFeedback;
+                      r[pos] = inR + fbR * modeFeedback;
+                      pos++; if (pos >= l.length) pos = 0;
+                      float modeWet = wet * (type == 4 ? 0.75f : 1f);
+                      s[0] = inL + dl * modeWet;
+                      s[1] = inR + dr * modeWet;
+                  }
+          
+                  void processInsert(float[] s) {
+                      if (!on) return;
+                      float dryL = s[0], dryR = s[1];
+                      processWet(s);
+                      float mix = Math.max(0.2f, wet);
+                      s[0] = dryL * (1f - mix) + s[0] * mix;
+                      s[1] = dryR * (1f - mix) + s[1] * mix;
+                  }
+              }
+          
+              private static final class ReverbFx {
+                  private int sampleRate = 44100;
+                  private float[] aL, aR, bL, bR, cL, cR, dL, dR;
+                  private float[] preL, preR;
+                  private int pa, pb, pc, pd, prePos;
+                  private boolean on;
+                  private float predelay = 0.1f;
+                  private float richness = 0.55f;
+                  private float decay = 0.55f;
+                  private float space = 0.55f;
+                  private float damping = 0.5f;
+                  private int mode;
+                  private float dampL, dampR;
+          
+                  ReverbFx() { configure(44100); }
+                  void configure(int sr) {
+                      sampleRate = sr;
+                      aL = new float[Math.max(67, (int)(sr * 0.0297))]; aR = new float[aL.length + 17];
+                      bL = new float[Math.max(73, (int)(sr * 0.0371))]; bR = new float[bL.length + 19];
+                      cL = new float[Math.max(79, (int)(sr * 0.0411))]; cR = new float[cL.length + 23];
+                      dL = new float[Math.max(83, (int)(sr * 0.0437))]; dR = new float[dL.length + 29];
+                      preL = new float[Math.max(256, (int)(sr * 0.25))]; preR = new float[preL.length];
+                      reset();
+                  }
+                  void reset() {
+                      java.util.Arrays.fill(aL,0); java.util.Arrays.fill(aR,0); java.util.Arrays.fill(bL,0); java.util.Arrays.fill(bR,0);
+                      java.util.Arrays.fill(cL,0); java.util.Arrays.fill(cR,0); java.util.Arrays.fill(dL,0); java.util.Arrays.fill(dR,0);
+                      java.util.Arrays.fill(preL,0); java.util.Arrays.fill(preR,0);
+                      pa=pb=pc=pd=prePos=0; dampL=dampR=0;
+                  }
+                  String handle(int c, float v, String name) {
+                      if (c == 0) { on = on(v); return name + " " + boolText(on); }
+                      if (c == 1) { predelay = norm(v); return pct(name + " predelay", predelay); }
+                      if (c == 2) { richness = norm(v); return pct(name + " ER/richness", richness); }
+                      if (c == 3) { decay = norm(v); return pct(name + " decay", decay); }
+                      if (c == 4) { space = norm(v); return pct(name + " space", space); }
+                      if (c == 5) { damping = norm(v); return pct(name + " damping", damping); }
+                      if (c == 7) { mode = Math.round(discrete(v, 3)); return name + " mode " + mode; }
+                      return name + " ctrl " + c;
+                  }
+                  void processWet(float[] s) {
+                      if (!on) return;
+                      float inL=s[0], inR=s[1];
+                      int preSamples = Math.max(1, Math.min(preL.length - 1, Math.round(predelay * 0.20f * sampleRate)));
+                      int preRead = prePos - preSamples; if (preRead < 0) preRead += preL.length;
+                      float preOutL = preL[preRead], preOutR = preR[preRead];
+                      preL[prePos] = inL; preR[prePos] = inR;
+                      prePos++; if (prePos >= preL.length) prePos = 0;
+                      float fb = 0.28f + decay * 0.68f;
+                      float modeMul = mode == 0 ? 1.0f : mode == 1 ? 0.78f : mode == 2 ? 0.9f : 0.58f;
+                      fb *= modeMul;
+                      float xL = preOutL * (0.18f + richness * 0.22f);
+                      float xR = preOutR * (0.18f + richness * 0.22f);
+                      float yaL=aL[pa], yaR=aR[pa % aR.length];
+                      float ybL=bL[pb], ybR=bR[pb % bR.length];
+                      float ycL=cL[pc], ycR=cR[pc % cR.length];
+                      float ydL=dL[pd], ydR=dR[pd % dR.length];
+                      dampL += (0.05f + (1f-damping)*0.8f) * (((yaL+ybL+ycL+ydL)*0.25f)-dampL);
+                      dampR += (0.05f + (1f-damping)*0.8f) * (((yaR+ybR+ycR+ydR)*0.25f)-dampR);
+                      aL[pa] = xL + dampL * fb; aR[pa % aR.length] = xR + dampR * fb;
+                      bL[pb] = xL + ybL * fb * 0.97f; bR[pb % bR.length] = xR + ybR * fb * 0.97f;
+                      cL[pc] = xL + ycL * fb * 0.93f; cR[pc % cR.length] = xR + ycR * fb * 0.93f;
+                      dL[pd] = xL + ydL * fb * 0.89f; dR[pd % dR.length] = xR + ydR * fb * 0.89f;
+                      pa=(pa+1)%aL.length; pb=(pb+1)%bL.length; pc=(pc+1)%cL.length; pd=(pd+1)%dL.length;
+                      float wet = 0.08f + space * 0.32f;
+                      s[0] = inL + (yaL+ybL+ycL+ydL) * 0.25f * wet;
+                      s[1] = inR + (yaR+ybR+ycR+ydR) * 0.25f * wet;
+                  }
+              }
+          
+              private static final class ChorusFx {
+                  private int sampleRate=44100;
+                  private float[] l=new float[4096], r=new float[4096];
+                  private int pos;
+                  private double phase;
+                  private boolean on;
+                  private int type; // 0 chorus, 1 flanger, 2 tremolo
+                  private float rate=0.25f, width=0.5f, depth=0.45f, wet=0.35f;
+                  private int pitchMode;
+          
+                  void configure(int sr) { sampleRate=sr; l=new float[Math.max(4096, sr/10)]; r=new float[l.length]; reset(); }
+                  void reset(){java.util.Arrays.fill(l,0);java.util.Arrays.fill(r,0);pos=0;phase=0;}
+                  String handle(int c,float v,String name){
+                      if(c==0){on=on(v);pitchMode=0;return name+" "+boolText(on);} if(c==1){rate=0.05f+norm(v)*7.95f;return String.format(Locale.US,"%s rate %.2f Hz",name,rate);} if(c==3){width=norm(v);return pct(name+" width",width);} if(c==4){depth=norm(v);return pct(name+" depth",depth);} if(c==7){type=Math.round(discrete(v,2));return name+" type "+type;} if(c==8){wet=norm(v);return pct(name+" mix",wet);} return name+" ctrl "+c;
+                  }
+                  String handleTremolo(int c,float v,String name){ if(c==0){on=on(v);type=2;pitchMode=0;return name+" "+boolText(on);} if(c==1){rate=0.2f+norm(v)*11.8f;return String.format(Locale.US,"%s rate %.2f Hz",name,rate);} if(c==4){depth=norm(v);return pct(name+" depth",depth);} return handle(c,v,name); }
+                  String handlePitch(int c,float v,String name){ if(c==0){on=on(v);pitchMode=1;return name+" "+boolText(on);} if(c==1||c==2){depth=norm(v);return pct(name+" pitch",depth);} if(c==5||c==6){wet=norm(v);return pct(name+" mix",wet);} return name+" ctrl "+c; }
+                  void processWet(float[] s){
+                      if(!on)return; float inL=s[0],inR=s[1];
+                      if(pitchMode==1){
+                          double semis=(depth-0.5)*24.0;
+                          double shift=(Math.pow(2.0,semis/12.0)-1.0)*110.0;
+                          phase += 2*Math.PI*shift/sampleRate; if(phase>2*Math.PI)phase-=2*Math.PI; if(phase<-2*Math.PI)phase+=2*Math.PI;
+                          float mod=(float)Math.cos(phase);
+                          s[0]=inL*(1f-wet)+(inL*mod)*wet; s[1]=inR*(1f-wet)+(inR*mod)*wet; return;
+                      }
+                      phase += 2*Math.PI*rate/sampleRate; if(phase>2*Math.PI)phase-=2*Math.PI; float si=(float)Math.sin(phase);
+                      if(type==2){float g=1f-depth*(0.5f+0.5f*si);s[0]=inL*((1f-wet)+wet*g);s[1]=inR*((1f-wet)+wet*g);return;}
+                      l[pos]=inL;r[pos]=inR; float base=type==1?0.003f:0.018f; float span=(type==1?0.0025f:0.012f)*depth; float delay=base+span*(0.5f+0.5f*si); int d=Math.max(1,Math.min(l.length-2,(int)(delay*sampleRate))); int rp=pos-d;if(rp<0)rp+=l.length; float dl=l[rp],dr=r[rp]; pos++;if(pos>=l.length)pos=0; s[0]=inL*(1f-wet)+dl*wet; s[1]=inR*(1f-wet)+dr*wet;
+                  }
+                  void processInsert(float[] s){processWet(s);}
+              }
+          
+              private static final class OverdriveFx {
+                  boolean on; int type; float drive=0.45f,tone=0.5f,level=0.7f; float lpL,lpR;
+                  String handle(int c,float v,String name){ if(c==0){on=on(v);return name+" "+boolText(on);} if(c==1){drive=norm(v);return pct(name+" drive",drive);} if(c==2){tone=norm(v);return pct(name+" tone",tone);} if(c==3){level=norm(v);return pct(name+" level",level);} if(c==7){type=Math.round(discrete(v,1));return name+" type "+type;} return name+" ctrl "+c; }
+                  void process(float[] s){ if(!on)return; float d=1.5f+drive*(type==1?16f:10f); float a=0.03f+tone*0.8f; float xL=softSat(s[0],d),xR=softSat(s[1],d); lpL+=a*(xL-lpL);lpR+=a*(xR-lpR); s[0]=lpL*(0.3f+level);s[1]=lpR*(0.3f+level); }
+                  void reset(){lpL=lpR=0;}
+              }
+          
+              private static final class AmpFx {
+                  boolean on; float drive=0.35f,bass=0.5f,mid=0.5f,treble=0.5f,presence=0.5f,volume=0.7f; int ampModel,cabModel,micModel,micPos,type; float lowL,lowR,highL,highR;
+                  String handle(int c,float v,String name){ if(c==0){on=on(v);return name+" "+boolText(on);} if(c==1){drive=norm(v);return pct(name+" drive",drive);} if(c==2){bass=norm(v);return pct(name+" bass",bass);} if(c==3){mid=norm(v);return pct(name+" mid",mid);} if(c==4){treble=norm(v);return pct(name+" treble",treble);} if(c==5){presence=norm(v);return pct(name+" presence",presence);} if(c==6){volume=norm(v);return pct(name+" volume",volume);} if(c==9){micModel=Math.round(discrete(v,8));return name+" mic "+micModel;} if(c==10){micPos=Math.round(discrete(v,4));return name+" mic pos "+micPos;} if(c==13){ampModel=Math.round(discrete(v,12));return name+" amp model "+ampModel;} if(c==14){cabModel=Math.round(discrete(v,12));return name+" cab model "+cabModel;} if(c==15){type=Math.round(discrete(v,1));return name+" type "+type;} if(c==16){bass=norm(v);return pct(name+" body",bass);} if(c==17){treble=norm(v);return pct(name+" acoustic treble",treble);} if(c==18){volume=norm(v);return pct(name+" acoustic volume",volume);} return name+" ctrl "+c; }
+                  void process(float[] s){ if(!on)return; float model=(ampModel%5)*0.15f; float drv=1.4f+drive*(7f+model*6f); float xL=softSat(s[0],drv),xR=softSat(s[1],drv); float lowA=0.02f+bass*0.15f; lowL+=lowA*(xL-lowL);lowR+=lowA*(xR-lowR); float hiA=0.12f+treble*0.78f;highL+=hiA*(xL-highL);highR+=hiA*(xR-highR); float midL=xL-lowL-(xL-highL);float midR=xR-lowR-(xR-highR); float yL=lowL*(0.6f+bass)+midL*(0.55f+mid)+highL*(0.5f+treble+presence*0.35f); float yR=lowR*(0.6f+bass)+midR*(0.55f+mid)+highR*(0.5f+treble+presence*0.35f); float cab=0.18f+((cabModel%6)/5f)*0.55f; highL += cab*(yL-highL); highR += cab*(yR-highR); s[0]=highL*(0.25f+volume);s[1]=highR*(0.25f+volume); }
+                  void reset(){lowL=lowR=highL=highR=0;}
+              }
+          
+              private static final class SpecialFx {
+                  boolean on; int type; float p1=0.5f,p2=0.5f,p3=0.5f,p4=0.5f,p5=0.5f,p6=0.5f; double phase; float env; float lpL,lpR; int zeroCountL,zeroCountR; float lastL,lastR;
+                  String handle(int c,float v,String name){ if(c==0){on=on(v);return name+" "+boolText(on);} if(c==1)p1=norm(v); else if(c==2)p2=norm(v); else if(c==3)p3=norm(v); else if(c==4)p4=norm(v); else if(c==5)p5=norm(v); else if(c==6)p6=norm(v); else if(c==7){type=Math.round(discrete(v,3));return name+" type "+type;} else return name+" ctrl "+c; return pct(name+" p"+c,norm(v)); }
+                  void process(float[] s,int sr){ if(!on)return; float l=s[0],r=s[1]; if(type==2){double freq=20+Math.pow(p4,2)*4000;phase+=2*Math.PI*freq/sr;if(phase>2*Math.PI)phase-=2*Math.PI;float mod=(float)Math.sin(phase);float mix=p6;s[0]=l*(1f-mix)+(l*mod)*mix;s[1]=r*(1f-mix)+(r*mod)*mix;return;} if(type==1){float e=Math.max(Math.abs(l),Math.abs(r));env+=0.01f*(e-env);float fc=150f+(p1+p3*env)*5000f;float a=(float)(1-Math.exp(-2*Math.PI*fc/sr));lpL+=a*(l-lpL);lpR+=a*(r-lpR);float mix=p4;s[0]=l*(1f-mix)+lpL*mix;s[1]=r*(1f-mix)+lpR*mix;return;} if(type==3){ if((l>=0)!=(lastL>=0))zeroCountL^=1;if((r>=0)!=(lastR>=0))zeroCountR^=1;lastL=l;lastR=r;float subL=zeroCountL==0?Math.abs(l):-Math.abs(l);float subR=zeroCountR==0?Math.abs(r):-Math.abs(r);float mix=clamp(p2+p3,0,1);s[0]=l*(1f-mix)+subL*mix;s[1]=r*(1f-mix)+subR*mix;return;} // pitch shifter approximation: dual-sideband frequency shift
+                      double semis=(p1-0.5)*24;double hz=(Math.pow(2,semis/12.0)-1.0)*110.0;phase+=2*Math.PI*hz/sr;if(phase>2*Math.PI)phase-=2*Math.PI;float mod=(float)Math.cos(phase);float mix=p6;s[0]=l*(1f-mix)+l*mod*mix;s[1]=r*(1f-mix)+r*mod*mix;
+                  }
+                  void reset(){phase=0;env=lpL=lpR=lastL=lastR=0;zeroCountL=zeroCountR=0;}
+              }
+          
+              private static final class MultiFxChain {
+                  int sampleRate=44100; int order; float boost; final DelayFx delay=new DelayFx(); final ChorusFx mod=new ChorusFx(); final SpecialFx fx=new SpecialFx(); final OverdriveFx od=new OverdriveFx(); final AmpFx amp=new AmpFx();
+                  void configure(int sr){sampleRate=sr;delay.configure(sr);mod.configure(sr);} void reset(){delay.reset();mod.reset();fx.reset();od.reset();amp.reset();}
+                  String handle(int channel,int control,float v,String name){ if(channel==0&&control==0){order=Math.round(discrete(v,5));return name+" order "+order;} if(channel==1)return delay.handle(control,v,name+" DEL"); if(channel==2)return mod.handle(control,v,name+" MOD"); if(channel==3)return fx.handle(control,v,name+" FX"); if(channel==4)return od.handle(control,v,name+" OD"); if(channel==5)return amp.handle(control,v,name+" AMP"); if(channel==6&&control==0){boost=norm(v);return pct(name+" boost",boost);} return name+" ch "+channel+" ctrl "+control; }
+                  void process(float[] s){ // Respect the mixer family order coarsely while keeping deterministic behavior.
+                      switch(order%4){ case 1: od.process(s);amp.process(s);delay.processInsert(s);mod.processInsert(s);fx.process(s,sampleRate);break; case 2: mod.processInsert(s);fx.process(s,sampleRate);od.process(s);amp.process(s);delay.processInsert(s);break; case 3: fx.process(s,sampleRate);delay.processInsert(s);mod.processInsert(s);od.process(s);amp.process(s);break; default: delay.processInsert(s);mod.processInsert(s);fx.process(s,sampleRate);od.process(s);amp.process(s); }
+                      if(boost>0.001f){float g=dbToAmp(boost*6f);s[0]=softSat(s[0]*g,1.5f);s[1]=softSat(s[1]*g,1.5f);} }
+              }
+          }
+          JAVA
+
+          cat > "$P/app/src/main/java/com/rcfbridge/player/PhoneAudioEngine.java" <<'JAVA'
+          package com.rcfbridge.player;
+          
+          import android.content.Context;
+          import android.media.AudioAttributes;
+          import android.media.AudioFormat;
+          import android.media.AudioTrack;
+          import android.media.MediaCodec;
+          import android.media.MediaExtractor;
+          import android.media.MediaFormat;
+          import android.net.Uri;
+          
+          import java.nio.ByteBuffer;
+          import java.nio.ByteOrder;
+          import java.nio.ShortBuffer;
+          import java.nio.FloatBuffer;
+          
+          /** Decodes the selected phone music to PCM, runs RCF-controlled DSP, and streams it to AudioTrack. */
+          public final class PhoneAudioEngine {
+              public interface StatusListener { void onStatus(String text, boolean playing); }
+          
+              private final Context context;
+              private final DspEngine dsp;
+              private final StatusListener listener;
+          
+              private volatile Uri uri;
+              private volatile boolean playing;
+              private volatile boolean ready;
+              private volatile int generation;
+              private Thread worker;
+              private AudioTrack audioTrack;
+          
+              public PhoneAudioEngine(Context context, DspEngine dsp, StatusListener listener) {
+                  this.context = context.getApplicationContext();
+                  this.dsp = dsp;
+                  this.listener = listener;
+              }
+          
+              public synchronized void load(Uri newUri) {
+                  stopInternal();
+                  uri = newUri;
+                  ready = newUri != null;
+                  playing = false;
+                  notifyStatus(ready ? "Music ready — full RCF DSP engine attached" : "Select a song.");
+              }
+          
+              public synchronized void toggle() {
+                  if (!ready || uri == null) {
+                      notifyStatus("Select music first.");
+                      return;
+                  }
+                  if (worker == null || !worker.isAlive()) {
+                      playing = true;
+                      final int myGeneration = ++generation;
+                      final Uri selected = uri;
+                      worker = new Thread(() -> decodeLoop(myGeneration, selected), "RCF-PCM-AUDIO");
+                      worker.start();
+                      notifyStatus("Playing — RCF DSP active");
+                      return;
+                  }
+                  playing = !playing;
+                  AudioTrack t = audioTrack;
+                  try {
+                      if (t != null) {
+                          if (playing) t.play(); else t.pause();
+                      }
+                  } catch (Exception ignored) {}
+                  notifyStatus(playing ? "Playing — RCF DSP active" : "Paused");
+              }
+          
+              public boolean isPlaying() { return playing; }
+          
+              public synchronized void release() {
+                  stopInternal();
+                  uri = null;
+                  ready = false;
+                  notifyStatus("Select a song.");
+              }
+          
+              private synchronized void stopInternal() {
+                  generation++;
+                  playing = false;
+                  AudioTrack t = audioTrack;
+                  if (t != null) {
+                      try { t.pause(); } catch (Exception ignored) {}
+                      try { t.flush(); } catch (Exception ignored) {}
+                  }
+                  Thread w = worker;
+                  if (w != null && w != Thread.currentThread()) {
+                      try { w.interrupt(); } catch (Exception ignored) {}
+                  }
+                  worker = null;
+              }
+          
+              private void decodeLoop(int myGeneration, Uri localUri) {
+                  MediaExtractor extractor = new MediaExtractor();
+                  MediaCodec decoder = null;
+                  AudioTrack track = null;
+                  try {
+                      if (localUri == null || myGeneration != generation) return;
+                      extractor.setDataSource(context, localUri, null);
+                      int audioTrackIndex = -1;
+                      MediaFormat inputFormat = null;
+                      String mime = null;
+                      for (int i = 0; i < extractor.getTrackCount(); i++) {
+                          MediaFormat f = extractor.getTrackFormat(i);
+                          String m = f.getString(MediaFormat.KEY_MIME);
+                          if (m != null && m.startsWith("audio/")) {
+                              audioTrackIndex = i;
+                              inputFormat = f;
+                              mime = m;
+                              break;
+                          }
+                      }
+                      if (audioTrackIndex < 0 || inputFormat == null || mime == null) {
+                          notifyStatus("No playable audio track found.");
+                          return;
+                      }
+                      extractor.selectTrack(audioTrackIndex);
+                      try { inputFormat.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT); } catch (Exception ignored) {}
+                      decoder = MediaCodec.createDecoderByType(mime);
+                      decoder.configure(inputFormat, null, null, 0);
+                      decoder.start();
+          
+                      int sampleRate = inputFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE) ? inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE) : 44100;
+                      int channelCount = inputFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT) ? inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2;
+                      channelCount = Math.max(1, Math.min(2, channelCount));
+                      dsp.configure(sampleRate, channelCount);
+                      dsp.reset();
+                      track = buildTrack(sampleRate, channelCount);
+                      synchronized (this) { audioTrack = track; }
+                      if (playing) track.play();
+          
+                      MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+                      boolean inputDone = false;
+                      boolean outputDone = false;
+                      int outputEncoding = AudioFormat.ENCODING_PCM_16BIT;
+                      final long TIMEOUT_US = 10000L;
+          
+                      while (myGeneration == generation && !outputDone) {
+                          if (!playing) {
+                              try { Thread.sleep(20L); } catch (InterruptedException ignored) {}
+                              continue;
+                          }
+          
+                          if (!inputDone) {
+                              int inIndex = decoder.dequeueInputBuffer(TIMEOUT_US);
+                              if (inIndex >= 0) {
+                                  ByteBuffer inBuf = decoder.getInputBuffer(inIndex);
+                                  if (inBuf != null) {
+                                      inBuf.clear();
+                                      int size = extractor.readSampleData(inBuf, 0);
+                                      if (size < 0) {
+                                          decoder.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                                          inputDone = true;
+                                      } else {
+                                          long pts = Math.max(0L, extractor.getSampleTime());
+                                          decoder.queueInputBuffer(inIndex, 0, size, pts, 0);
+                                          extractor.advance();
+                                      }
+                                  }
+                              }
+                          }
+          
+                          int outIndex = decoder.dequeueOutputBuffer(info, TIMEOUT_US);
+                          if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                              MediaFormat outFormat = decoder.getOutputFormat();
+                              int newRate = outFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE) ? outFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE) : sampleRate;
+                              int newChannels = outFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT) ? outFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : channelCount;
+                              newChannels = Math.max(1, Math.min(2, newChannels));
+                              if (outFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                                  try { outputEncoding = outFormat.getInteger(MediaFormat.KEY_PCM_ENCODING); } catch (Exception ignored) {}
+                              }
+                              if (newRate != sampleRate || newChannels != channelCount) {
+                                  sampleRate = newRate;
+                                  channelCount = newChannels;
+                                  dsp.configure(sampleRate, channelCount);
+                                  try { track.pause(); track.flush(); track.release(); } catch (Exception ignored) {}
+                                  track = buildTrack(sampleRate, channelCount);
+                                  synchronized (this) { audioTrack = track; }
+                                  if (playing) track.play();
+                              }
+                          } else if (outIndex >= 0) {
+                              ByteBuffer outBuf = decoder.getOutputBuffer(outIndex);
+                              if (outBuf != null && info.size > 0) {
+                                  outBuf.position(info.offset);
+                                  outBuf.limit(info.offset + info.size);
+                                  ByteBuffer slice = outBuf.slice().order(ByteOrder.nativeOrder());
+                                  short[] pcm;
+                                  if (outputEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+                                      FloatBuffer fb = slice.asFloatBuffer();
+                                      pcm = new short[fb.remaining()];
+                                      for (int i = 0; i < pcm.length; i++) {
+                                          float x = Math.max(-1f, Math.min(1f, fb.get()));
+                                          pcm[i] = (short)Math.round(x * 32767f);
+                                      }
+                                  } else {
+                                      ShortBuffer sb = slice.asShortBuffer();
+                                      pcm = new short[sb.remaining()];
+                                      sb.get(pcm);
+                                  }
+                                  if (pcm.length > 0) {
+                                      dsp.process(pcm, pcm.length, channelCount);
+                                      int written = 0;
+                                      while (written < pcm.length && myGeneration == generation) {
+                                          int n = track.write(pcm, written, pcm.length - written, AudioTrack.WRITE_BLOCKING);
+                                          if (n <= 0) break;
+                                          written += n;
+                                      }
+                                  }
+                              }
+                              outputDone = (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+                              decoder.releaseOutputBuffer(outIndex, false);
+                          }
+                      }
+          
+                      if (myGeneration == generation && outputDone) {
+                          playing = false;
+                          notifyStatus("Playback complete — press PLAY to restart");
+                      }
+                  } catch (Exception e) {
+                      playing = false;
+                      notifyStatus("Audio error: " + safe(e.getMessage()));
+                  } finally {
+                      try { extractor.release(); } catch (Exception ignored) {}
+                      if (decoder != null) {
+                          try { decoder.stop(); } catch (Exception ignored) {}
+                          try { decoder.release(); } catch (Exception ignored) {}
+                      }
+                      if (track != null) {
+                          try { track.pause(); } catch (Exception ignored) {}
+                          try { track.flush(); } catch (Exception ignored) {}
+                          try { track.release(); } catch (Exception ignored) {}
+                      }
+                      synchronized (this) {
+                          if (audioTrack == track) audioTrack = null;
+                          if (worker == Thread.currentThread()) worker = null;
+                      }
+                  }
+              }
+          
+              private static AudioTrack buildTrack(int sampleRate, int channelCount) {
+                  int channelMask = channelCount == 1 ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
+                  int min = AudioTrack.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT);
+                  if (min < 0) min = sampleRate * channelCount * 2 / 5;
+                  int buffer = Math.max(min * 3, sampleRate * channelCount * 2 / 4);
+                  return new AudioTrack.Builder()
+                          .setAudioAttributes(new AudioAttributes.Builder()
+                                  .setUsage(AudioAttributes.USAGE_MEDIA)
+                                  .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                  .build())
+                          .setAudioFormat(new AudioFormat.Builder()
+                                  .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                  .setSampleRate(sampleRate)
+                                  .setChannelMask(channelMask)
+                                  .build())
+                          .setTransferMode(AudioTrack.MODE_STREAM)
+                          .setBufferSizeInBytes(buffer)
+                          .build();
+              }
+          
+              private void notifyStatus(String text) {
+                  if (listener != null) listener.onStatus(text, playing);
+              }
+          
+              private static String safe(String s) { return s == null ? "unknown" : s; }
+          }
+          JAVA
+
+      - name: Pure Java DSP smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          P="$RUNNER_TEMP/RCFBridgePlayer"
+          T="$RUNNER_TEMP/dsp-smoke"
+          mkdir -p "$T/out"
+          cat > "$T/DspSmoke.java" <<'EOF'
+          import com.rcfbridge.player.DspEngine;
+          public class DspSmoke {
+              private static void need(boolean ok, String msg) { if (!ok) throw new RuntimeException(msg); }
+              public static void main(String[] args) {
+                  DspEngine d = new DspEngine();
+                  d.configure(48000, 2);
+                  need(d.handleOsc("/00/00/gq_001", 1f).contains("20.0 Hz"), "GEQ low band mapping failed");
+                  need(d.handleOsc("/00/00/gq_031", 1f).contains("20000.0 Hz"), "GEQ high band mapping failed");
+                  need(d.handleOsc("/00/00/tw_000", 1f) != null, "Valve mapping failed");
+                  need(d.handleOsc("/00/00/ex_000", 1f) != null, "Xciter mapping failed");
+                  need(d.handleOsc("/00/00/mx_000", 1f) != null, "Maximizer mapping failed");
+                  need(d.handleOsc("/11/00/fx_000", 1f) != null, "Reverb mapping failed");
+                  need(d.handleOsc("/11/01/fx_000", 1f) != null, "Delay mapping failed");
+                  need(d.handleOsc("/28/04/fx_000", 1f) != null, "MFX overdrive mapping failed");
+                  need(d.handleOsc("/28/05/fx_013", 0.5f) != null, "MFX amp model mapping failed");
+                  need(d.handleOsc("/13/00/fd_000", 0.75f) != null, "Phones fader mapping failed");
+                  need(d.handleOsc("/22/00/gb_079", 1f) != null, "PFL mapping failed");
+                  short[] pcm = new short[9600];
+                  for (int i=0;i<pcm.length;i+=2) { short x=(short)(Math.sin(i*0.03)*10000); pcm[i]=x; pcm[i+1]=x; }
+                  d.process(pcm, pcm.length, 2);
+                  System.out.println("FULL DSP smoke test OK");
+              }
+          }
+          EOF
+          javac -d "$T/out" "$P/app/src/main/java/com/rcfbridge/player/DspEngine.java" "$T/DspSmoke.java"
+          java -cp "$T/out" DspSmoke
+
+      - name: Build installable APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          P="$RUNNER_TEMP/RCFBridgePlayer"
+          gradle --no-daemon --stacktrace -p "$P" :app:assembleDebug
+          cp "$P/app/build/outputs/apk/debug/app-debug.apk" RCFBridgePlayer-FULL-DSP-Android12-13.apk
+          sha256sum RCFBridgePlayer-FULL-DSP-Android12-13.apk > RCFBridgePlayer-FULL-DSP-Android12-13.sha256
+
+      - name: Verify APK package and SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$AAPT" dump badging RCFBridgePlayer-FULL-DSP-Android12-13.apk | tee apk-badging.txt
+          grep -q "package: name='com.rcfbridge.player'" apk-badging.txt
+          grep -q "targetSdkVersion:'33'" apk-badging.txt
+          "$APKSIGNER" verify --verbose --print-certs RCFBridgePlayer-FULL-DSP-Android12-13.apk | tee apk-signature.txt
+
+      - name: Upload verified APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RCF-Bridge-Player-FULL-DSP-Android12-13
+          path: |
+            RCFBridgePlayer-FULL-DSP-Android12-13.apk
+            RCFBridgePlayer-FULL-DSP-Android12-13.sha256
+            apk-badging.txt
+            apk-signature.txt
+          if-no-files-found: error
