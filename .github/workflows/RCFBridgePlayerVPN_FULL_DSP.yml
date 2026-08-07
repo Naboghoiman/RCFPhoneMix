@@ -5,8 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - ".github/workflows/RCFBridgePlayerVPN.yml"
-
+      - ".github/workflows/RCFBridgePlayerVPN_FULL_DSP.yml"
 permissions:
   contents: read
 
