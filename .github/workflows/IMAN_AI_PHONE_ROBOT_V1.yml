@@ -1,0 +1,1016 @@
+name: Build IMAN AI PHONE ROBOT v1
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/IMAN_AI_PHONE_ROBOT_V1.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate native Android project
+        run: |
+          set -euo pipefail
+          P="$RUNNER_TEMP/iman-ai-phone-robot"
+          rm -rf "$P"
+          mkdir -p "$P/app/src/main/java/com/iman/airobot" "$P/app/src/main/res/values"
+
+          cat > "$P/settings.gradle" <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'ImanAiPhoneRobot'
+          include ':app'
+          EOF
+
+          cat > "$P/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > "$P/gradle.properties" <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > "$P/app/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.iman.airobot'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.iman.airobot'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0-native-agent'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > "$P/app/src/main/res/values/strings.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">IMAN AI ROBOT</string>
+          </resources>
+          EOF
+
+          cat > "$P/app/src/main/AndroidManifest.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.READ_CONTACTS" />
+              <uses-permission android:name="android.permission.CALL_PHONE" />
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="true"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > "$P/app/src/main/java/com/iman/airobot/SecureKeyStore.java" <<'EOF'
+          package com.iman.airobot;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.security.keystore.KeyGenParameterSpec;
+          import android.security.keystore.KeyProperties;
+          import android.util.Base64;
+
+          import java.nio.charset.StandardCharsets;
+          import java.security.KeyStore;
+
+          import javax.crypto.Cipher;
+          import javax.crypto.KeyGenerator;
+          import javax.crypto.SecretKey;
+          import javax.crypto.spec.GCMParameterSpec;
+
+          public final class SecureKeyStore {
+              private static final String ALIAS = "iman_openai_key";
+              private static final String PREF = "iman_secure";
+              private static final String VALUE = "api_key";
+              private static final String IV = "api_iv";
+
+              private SecureKeyStore() {}
+
+              private static SecretKey getOrCreateKey() throws Exception {
+                  KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+                  ks.load(null);
+                  if (ks.containsAlias(ALIAS)) {
+                      return ((KeyStore.SecretKeyEntry) ks.getEntry(ALIAS, null)).getSecretKey();
+                  }
+                  KeyGenerator kg = KeyGenerator.getInstance(
+                          KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+                  kg.init(new KeyGenParameterSpec.Builder(
+                          ALIAS,
+                          KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                          .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                          .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                          .build());
+                  return kg.generateKey();
+              }
+
+              public static void save(Context c, String raw) throws Exception {
+                  Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                  cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey());
+                  byte[] enc = cipher.doFinal(raw.getBytes(StandardCharsets.UTF_8));
+                  SharedPreferences p = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+                  p.edit()
+                          .putString(VALUE, Base64.encodeToString(enc, Base64.NO_WRAP))
+                          .putString(IV, Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP))
+                          .apply();
+              }
+
+              public static String load(Context c) {
+                  try {
+                      SharedPreferences p = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+                      String v = p.getString(VALUE, null);
+                      String iv = p.getString(IV, null);
+                      if (v == null || iv == null) return "";
+                      Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                      cipher.init(
+                              Cipher.DECRYPT_MODE,
+                              getOrCreateKey(),
+                              new GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)));
+                      byte[] dec = cipher.doFinal(Base64.decode(v, Base64.NO_WRAP));
+                      return new String(dec, StandardCharsets.UTF_8);
+                  } catch (Exception e) {
+                      return "";
+                  }
+              }
+          }
+          EOF
+
+          cat > "$P/app/src/main/java/com/iman/airobot/ConversationMemory.java" <<'EOF'
+          package com.iman.airobot;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          public final class ConversationMemory {
+              private static final String PREF = "iman_memory";
+              private static final String KEY = "turns";
+
+              private ConversationMemory() {}
+
+              public static synchronized void add(Context c, String role, String text) {
+                  try {
+                      JSONArray a = load(c);
+                      JSONObject o = new JSONObject();
+                      o.put("role", role);
+                      o.put("text", text);
+                      o.put("time", System.currentTimeMillis());
+                      a.put(o);
+
+                      JSONArray keep = new JSONArray();
+                      int start = Math.max(0, a.length() - 12);
+                      for (int i = start; i < a.length(); i++) keep.put(a.getJSONObject(i));
+                      c.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                              .edit().putString(KEY, keep.toString()).apply();
+                  } catch (Exception ignored) {}
+              }
+
+              public static synchronized String context(Context c) {
+                  try {
+                      JSONArray a = load(c);
+                      StringBuilder b = new StringBuilder();
+                      for (int i = 0; i < a.length(); i++) {
+                          JSONObject o = a.getJSONObject(i);
+                          b.append(o.optString("role")).append(": ")
+                                  .append(o.optString("text")).append("\n");
+                      }
+                      return b.toString();
+                  } catch (Exception e) {
+                      return "";
+                  }
+              }
+
+              private static JSONArray load(Context c) {
+                  SharedPreferences p = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+                  String s = p.getString(KEY, "[]");
+                  try { return new JSONArray(s); }
+                  catch (Exception e) { return new JSONArray(); }
+              }
+          }
+          EOF
+
+          cat > "$P/app/src/main/java/com/iman/airobot/AiClient.java" <<'EOF'
+          package com.iman.airobot;
+
+          import android.content.Context;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.io.BufferedReader;
+          import java.io.InputStream;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+
+          public final class AiClient {
+              public interface Callback {
+                  void onSuccess(Action action);
+                  void onError(String error);
+              }
+
+              public static final class Action {
+                  public String action = "answer";
+                  public String argument = "";
+                  public String response = "";
+              }
+
+              private static final ExecutorService EXEC = Executors.newSingleThreadExecutor();
+
+              private static final String INSTRUCTIONS =
+                      "You are IMAN AI PHONE ROBOT, an Android voice agent. " +
+                      "Understand the user's natural language and choose exactly one action. " +
+                      "Return ONLY a JSON object, no markdown. Fields: action, argument, response. " +
+                      "Valid actions: answer, play_song, pause_music, resume_music, stop_music, " +
+                      "call_contact, open_app, set_alarm, flashlight_on, flashlight_off, " +
+                      "volume_up, volume_down, take_photo, web_search. " +
+                      "For play_song argument is the song/title/artist query. " +
+                      "For call_contact argument is the contact name. " +
+                      "For open_app argument is the app name. " +
+                      "For set_alarm argument MUST be 24-hour HH:mm local time. " +
+                      "For web_search argument is the search query. " +
+                      "For actions with no parameter use empty argument. " +
+                      "response is a short natural spoken reply. " +
+                      "If the request is general conversation or knowledge, use action=answer and put the answer in response.";
+
+              private AiClient() {}
+
+              public static void send(Context context, String userText, Callback cb) {
+                  EXEC.execute(() -> {
+                      try {
+                          String key = SecureKeyStore.load(context);
+                          if (key.isEmpty()) {
+                              cb.onError("OpenAI API key is not set.");
+                              return;
+                          }
+
+                          String memory = ConversationMemory.context(context);
+                          JSONObject body = new JSONObject();
+                          body.put("model", "gpt-5");
+                          body.put("instructions", INSTRUCTIONS);
+
+                          JSONArray input = new JSONArray();
+
+                          if (!memory.isEmpty()) {
+                              JSONObject mem = new JSONObject();
+                              mem.put("role", "developer");
+                              JSONArray content = new JSONArray();
+                              JSONObject c = new JSONObject();
+                              c.put("type", "input_text");
+                              c.put("text", "Recent conversation memory:\n" + memory);
+                              content.put(c);
+                              mem.put("content", content);
+                              input.put(mem);
+                          }
+
+                          JSONObject user = new JSONObject();
+                          user.put("role", "user");
+                          JSONArray uc = new JSONArray();
+                          JSONObject ut = new JSONObject();
+                          ut.put("type", "input_text");
+                          ut.put("text", userText);
+                          uc.put(ut);
+                          user.put("content", uc);
+                          input.put(user);
+                          body.put("input", input);
+
+                          URL url = new URL("https://api.openai.com/v1/responses");
+                          HttpURLConnection con = (HttpURLConnection) url.openConnection();
+                          con.setConnectTimeout(20000);
+                          con.setReadTimeout(60000);
+                          con.setRequestMethod("POST");
+                          con.setDoOutput(true);
+                          con.setRequestProperty("Authorization", "Bearer " + key);
+                          con.setRequestProperty("Content-Type", "application/json");
+
+                          try (OutputStream os = con.getOutputStream()) {
+                              os.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                          }
+
+                          int code = con.getResponseCode();
+                          InputStream is = code >= 200 && code < 300
+                                  ? con.getInputStream() : con.getErrorStream();
+                          String raw = readAll(is);
+
+                          if (code < 200 || code >= 300) {
+                              cb.onError("AI request failed (" + code + "): " + compactError(raw));
+                              return;
+                          }
+
+                          JSONObject root = new JSONObject(raw);
+                          String text = extractOutputText(root);
+                          if (text == null || text.trim().isEmpty()) {
+                              cb.onError("AI returned no text.");
+                              return;
+                          }
+
+                          text = stripFences(text.trim());
+                          JSONObject j = new JSONObject(text);
+                          Action a = new Action();
+                          a.action = j.optString("action", "answer");
+                          a.argument = j.optString("argument", "");
+                          a.response = j.optString("response", "");
+                          cb.onSuccess(a);
+                      } catch (Exception e) {
+                          cb.onError(e.getClass().getSimpleName() + ": " + e.getMessage());
+                      }
+                  });
+              }
+
+              private static String extractOutputText(JSONObject root) throws Exception {
+                  JSONArray out = root.optJSONArray("output");
+                  if (out == null) return "";
+                  StringBuilder b = new StringBuilder();
+                  for (int i = 0; i < out.length(); i++) {
+                      JSONObject item = out.optJSONObject(i);
+                      if (item == null) continue;
+                      JSONArray content = item.optJSONArray("content");
+                      if (content == null) continue;
+                      for (int k = 0; k < content.length(); k++) {
+                          JSONObject c = content.optJSONObject(k);
+                          if (c != null && "output_text".equals(c.optString("type"))) {
+                              b.append(c.optString("text"));
+                          }
+                      }
+                  }
+                  return b.toString();
+              }
+
+              private static String readAll(InputStream is) throws Exception {
+                  if (is == null) return "";
+                  BufferedReader r = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+                  StringBuilder b = new StringBuilder();
+                  String line;
+                  while ((line = r.readLine()) != null) b.append(line);
+                  return b.toString();
+              }
+
+              private static String stripFences(String s) {
+                  if (s.startsWith("```")) {
+                      int firstNl = s.indexOf('\n');
+                      int last = s.lastIndexOf("```");
+                      if (firstNl >= 0 && last > firstNl) s = s.substring(firstNl + 1, last).trim();
+                  }
+                  return s;
+              }
+
+              private static String compactError(String raw) {
+                  try {
+                      JSONObject j = new JSONObject(raw);
+                      JSONObject e = j.optJSONObject("error");
+                      if (e != null) return e.optString("message", raw);
+                  } catch (Exception ignored) {}
+                  return raw.length() > 250 ? raw.substring(0, 250) : raw;
+              }
+          }
+          EOF
+
+          cat > "$P/app/src/main/java/com/iman/airobot/PhoneTools.java" <<'EOF'
+          package com.iman.airobot;
+
+          import android.app.Activity;
+          import android.content.ContentResolver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.database.Cursor;
+          import android.hardware.camera2.CameraCharacteristics;
+          import android.hardware.camera2.CameraManager;
+          import android.media.AudioManager;
+          import android.media.MediaPlayer;
+          import android.net.Uri;
+          import android.provider.AlarmClock;
+          import android.provider.ContactsContract;
+          import android.provider.MediaStore;
+
+          import java.util.List;
+          import java.util.Locale;
+
+          public final class PhoneTools {
+              private static MediaPlayer player;
+
+              private PhoneTools() {}
+
+              public static String execute(Activity a, AiClient.Action x) {
+                  try {
+                      switch (x.action) {
+                          case "play_song": return playSong(a, x.argument);
+                          case "pause_music": return pauseMusic();
+                          case "resume_music": return resumeMusic();
+                          case "stop_music": return stopMusic();
+                          case "call_contact": return callContact(a, x.argument);
+                          case "open_app": return openApp(a, x.argument);
+                          case "set_alarm": return setAlarm(a, x.argument);
+                          case "flashlight_on": return torch(a, true);
+                          case "flashlight_off": return torch(a, false);
+                          case "volume_up": return volume(a, true);
+                          case "volume_down": return volume(a, false);
+                          case "take_photo": return takePhoto(a);
+                          case "web_search": return webSearch(a, x.argument);
+                          case "answer":
+                          default: return "";
+                      }
+                  } catch (SecurityException se) {
+                      return "Permission is required: " + se.getMessage();
+                  } catch (Exception e) {
+                      return "I couldn't perform that phone action: " + e.getMessage();
+                  }
+              }
+
+              private static String playSong(Context c, String q) throws Exception {
+                  if (q == null || q.trim().isEmpty()) return "Tell me which song to play.";
+                  ContentResolver cr = c.getContentResolver();
+                  Uri uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+                  String[] projection = {
+                          MediaStore.Audio.Media._ID,
+                          MediaStore.Audio.Media.TITLE,
+                          MediaStore.Audio.Media.ARTIST
+                  };
+                  String sel = MediaStore.Audio.Media.IS_MUSIC + "!=0 AND (" +
+                          MediaStore.Audio.Media.TITLE + " LIKE ? OR " +
+                          MediaStore.Audio.Media.ARTIST + " LIKE ?)";
+                  String term = "%" + q.trim() + "%";
+                  Cursor cur = cr.query(uri, projection, sel, new String[]{term, term},
+                          MediaStore.Audio.Media.TITLE + " ASC");
+                  if (cur == null) return "I couldn't read the music library.";
+                  try {
+                      if (!cur.moveToFirst()) return "I couldn't find " + q + " in local storage.";
+                      long id = cur.getLong(cur.getColumnIndexOrThrow(MediaStore.Audio.Media._ID));
+                      String title = cur.getString(cur.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE));
+                      String artist = cur.getString(cur.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST));
+                      Uri song = Uri.withAppendedPath(uri, String.valueOf(id));
+                      if (player != null) {
+                          try { player.stop(); } catch (Exception ignored) {}
+                          player.release();
+                      }
+                      player = new MediaPlayer();
+                      player.setDataSource(c, song);
+                      player.setAudioStreamType(AudioManager.STREAM_MUSIC);
+                      player.prepare();
+                      player.start();
+                      return "Playing " + title + (artist == null ? "" : " by " + artist) + ".";
+                  } finally {
+                      cur.close();
+                  }
+              }
+
+              private static String pauseMusic() {
+                  if (player != null && player.isPlaying()) {
+                      player.pause();
+                      return "Music paused.";
+                  }
+                  return "No IMAN music is currently playing.";
+              }
+
+              private static String resumeMusic() {
+                  if (player != null) {
+                      player.start();
+                      return "Music resumed.";
+                  }
+                  return "No song is loaded.";
+              }
+
+              private static String stopMusic() {
+                  if (player != null) {
+                      try { player.stop(); } catch (Exception ignored) {}
+                      player.release();
+                      player = null;
+                      return "Music stopped.";
+                  }
+                  return "No IMAN music is currently playing.";
+              }
+
+              private static String callContact(Activity a, String name) {
+                  if (name == null || name.trim().isEmpty()) return "Tell me who to call.";
+                  ContentResolver cr = a.getContentResolver();
+                  String[] p = {
+                          ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                          ContactsContract.CommonDataKinds.Phone.NUMBER
+                  };
+                  Cursor cur = cr.query(
+                          ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                          p,
+                          ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?",
+                          new String[]{"%" + name.trim() + "%"},
+                          ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC");
+                  if (cur == null) return "I couldn't read contacts.";
+                  try {
+                      if (!cur.moveToFirst()) return "I couldn't find a contact named " + name + ".";
+                      String display = cur.getString(0);
+                      String number = cur.getString(1);
+                      Intent i = new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(number)));
+                      a.startActivity(i);
+                      return "Calling " + display + ".";
+                  } finally {
+                      cur.close();
+                  }
+              }
+
+              private static String openApp(Activity a, String name) {
+                  if (name == null || name.trim().isEmpty()) return "Tell me which app to open.";
+                  PackageManager pm = a.getPackageManager();
+                  Intent query = new Intent(Intent.ACTION_MAIN);
+                  query.addCategory(Intent.CATEGORY_LAUNCHER);
+                  List<ResolveInfo> list = pm.queryIntentActivities(query, 0);
+                  ResolveInfo best = null;
+                  String needle = name.toLowerCase(Locale.ROOT).trim();
+
+                  for (ResolveInfo r : list) {
+                      String label = String.valueOf(r.loadLabel(pm)).toLowerCase(Locale.ROOT);
+                      if (label.equals(needle)) { best = r; break; }
+                      if (best == null && label.contains(needle)) best = r;
+                  }
+                  if (best == null) return "I couldn't find the app " + name + ".";
+                  Intent launch = pm.getLaunchIntentForPackage(best.activityInfo.packageName);
+                  if (launch == null) return "I found " + name + " but couldn't launch it.";
+                  a.startActivity(launch);
+                  return "Opening " + best.loadLabel(pm) + ".";
+              }
+
+              private static String setAlarm(Activity a, String hhmm) {
+                  try {
+                      String[] p = hhmm.trim().split(":");
+                      int h = Integer.parseInt(p[0]);
+                      int m = Integer.parseInt(p[1]);
+                      Intent i = new Intent(AlarmClock.ACTION_SET_ALARM);
+                      i.putExtra(AlarmClock.EXTRA_HOUR, h);
+                      i.putExtra(AlarmClock.EXTRA_MINUTES, m);
+                      i.putExtra(AlarmClock.EXTRA_MESSAGE, "IMAN AI ROBOT");
+                      a.startActivity(i);
+                      return String.format(Locale.getDefault(), "Alarm set for %02d:%02d.", h, m);
+                  } catch (Exception e) {
+                      return "I couldn't understand the alarm time.";
+                  }
+              }
+
+              private static String torch(Context c, boolean on) throws Exception {
+                  CameraManager cm = (CameraManager) c.getSystemService(Context.CAMERA_SERVICE);
+                  for (String id : cm.getCameraIdList()) {
+                      Boolean has = cm.getCameraCharacteristics(id)
+                              .get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
+                      if (Boolean.TRUE.equals(has)) {
+                          cm.setTorchMode(id, on);
+                          return on ? "Flashlight on." : "Flashlight off.";
+                      }
+                  }
+                  return "This phone did not report an available flashlight.";
+              }
+
+              private static String volume(Context c, boolean up) {
+                  AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+                  am.adjustStreamVolume(
+                          AudioManager.STREAM_MUSIC,
+                          up ? AudioManager.ADJUST_RAISE : AudioManager.ADJUST_LOWER,
+                          AudioManager.FLAG_SHOW_UI);
+                  return up ? "Volume increased." : "Volume decreased.";
+              }
+
+              private static String takePhoto(Activity a) {
+                  Intent i = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                  if (i.resolveActivity(a.getPackageManager()) != null) {
+                      a.startActivity(i);
+                      return "Opening the camera.";
+                  }
+                  return "I couldn't find a camera app.";
+              }
+
+              private static String webSearch(Activity a, String q) {
+                  Uri u = Uri.parse("https://www.google.com/search?q=" + Uri.encode(q == null ? "" : q));
+                  a.startActivity(new Intent(Intent.ACTION_VIEW, u));
+                  return "Searching the web for " + q + ".";
+              }
+          }
+          EOF
+
+          cat > "$P/app/src/main/java/com/iman/airobot/MainActivity.java" <<'EOF'
+          package com.iman.airobot;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.graphics.Color;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.speech.RecognizerIntent;
+          import android.speech.tts.TextToSpeech;
+          import android.text.InputType;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Locale;
+
+          public class MainActivity extends Activity {
+              private static final int VOICE_REQ = 4101;
+              private static final int PERM_REQ = 4102;
+
+              private TextView status;
+              private TextView conversation;
+              private EditText command;
+              private TextToSpeech tts;
+
+              @Override protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  buildUi();
+                  tts = new TextToSpeech(this, s -> {
+                      if (s == TextToSpeech.SUCCESS) tts.setLanguage(Locale.getDefault());
+                  });
+                  requestPermissionsIfNeeded();
+
+                  if (SecureKeyStore.load(this).isEmpty()) {
+                      status.setText("AI SETUP REQUIRED");
+                      showApiKeyDialog();
+                  } else {
+                      status.setText("READY • ONLINE AI");
+                  }
+              }
+
+              @Override protected void onDestroy() {
+                  if (tts != null) {
+                      tts.stop();
+                      tts.shutdown();
+                  }
+                  super.onDestroy();
+              }
+
+              private void buildUi() {
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setBackgroundColor(Color.rgb(7, 17, 28));
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(18), dp(22), dp(18), dp(28));
+
+                  TextView title = text("IMAN AI PHONE ROBOT", 25, Color.WHITE, true);
+                  title.setGravity(Gravity.CENTER);
+                  root.addView(title, full());
+
+                  TextView sub = text("ONLINE BRAIN • VOICE • MUSIC • CONTACTS • PHONE TOOLS",
+                          11, Color.rgb(73, 216, 255), true);
+                  sub.setGravity(Gravity.CENTER);
+                  sub.setPadding(0, dp(6), 0, dp(18));
+                  root.addView(sub, full());
+
+                  TextView face = text("●     ●\n\n━━━", 54, Color.rgb(73, 216, 255), true);
+                  face.setGravity(Gravity.CENTER);
+                  face.setBackgroundColor(Color.rgb(11, 28, 42));
+                  face.setPadding(0, dp(28), 0, dp(28));
+                  root.addView(face, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, dp(230)));
+
+                  status = text("STARTING…", 13, Color.rgb(73, 216, 255), true);
+                  status.setGravity(Gravity.CENTER);
+                  status.setPadding(0, dp(10), 0, dp(10));
+                  root.addView(status, full());
+
+                  conversation = text(
+                          "Try: “Play My Love by Westlife”, “Call John”, “Open WhatsApp”, " +
+                          "“Set an alarm for 6 AM”, “Turn on the flashlight”, or ask me a question.",
+                          14, Color.WHITE, false);
+                  conversation.setBackgroundColor(Color.rgb(10, 23, 35));
+                  conversation.setPadding(dp(12), dp(12), dp(12), dp(12));
+                  root.addView(conversation, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, dp(220)));
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  command = new EditText(this);
+                  command.setHint("Tell IMAN what to do…");
+                  command.setTextColor(Color.WHITE);
+                  command.setHintTextColor(Color.GRAY);
+                  command.setSingleLine(false);
+                  command.setMinLines(1);
+                  command.setMaxLines(3);
+                  command.setBackgroundColor(Color.rgb(14, 34, 50));
+                  LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(
+                          0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                  row.addView(command, ep);
+
+                  Button send = button("SEND");
+                  send.setOnClickListener(v -> handle(command.getText().toString()));
+                  LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(95), dp(58));
+                  bp.setMargins(dp(8), 0, 0, 0);
+                  row.addView(send, bp);
+                  root.addView(row, top(8));
+
+                  Button talk = button("🎤  TALK TO IMAN");
+                  talk.setTextSize(17);
+                  talk.setOnClickListener(v -> startVoice());
+                  root.addView(talk, top(10));
+
+                  LinearLayout tools = new LinearLayout(this);
+                  tools.setOrientation(LinearLayout.HORIZONTAL);
+
+                  Button key = button("AI KEY");
+                  key.setOnClickListener(v -> showApiKeyDialog());
+                  tools.addView(key, weight());
+
+                  Button perms = button("PERMISSIONS");
+                  perms.setOnClickListener(v -> requestPermissionsIfNeeded());
+                  LinearLayout.LayoutParams wp = weight();
+                  wp.setMargins(dp(8), 0, 0, 0);
+                  tools.addView(perms, wp);
+
+                  root.addView(tools, top(8));
+
+                  TextView note = text(
+                          "The API key is encrypted with Android Keystore and is never hard-coded in the APK.",
+                          11, Color.GRAY, false);
+                  note.setGravity(Gravity.CENTER);
+                  note.setPadding(0, dp(12), 0, 0);
+                  root.addView(note, full());
+
+                  scroll.addView(root);
+                  setContentView(scroll);
+              }
+
+              private void startVoice() {
+                  Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                          RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault());
+                  i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to IMAN");
+                  try {
+                      status.setText("LISTENING…");
+                      startActivityForResult(i, VOICE_REQ);
+                  } catch (Exception e) {
+                      Toast.makeText(this, "Speech recognition is not available.", Toast.LENGTH_LONG).show();
+                      status.setText("READY");
+                  }
+              }
+
+              @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode == VOICE_REQ) {
+                      status.setText("READY");
+                      if (resultCode == RESULT_OK && data != null) {
+                          ArrayList<String> r = data.getStringArrayListExtra(
+                                  RecognizerIntent.EXTRA_RESULTS);
+                          if (r != null && !r.isEmpty()) handle(r.get(0));
+                      }
+                  }
+              }
+
+              private void handle(String userText) {
+                  userText = userText == null ? "" : userText.trim();
+                  if (userText.isEmpty()) return;
+
+                  command.setText("");
+                  conversation.setText("YOU: " + userText + "\n\nIMAN: Thinking…");
+                  status.setText("THINKING ONLINE…");
+                  ConversationMemory.add(this, "user", userText);
+
+                  AiClient.send(this, userText, new AiClient.Callback() {
+                      @Override public void onSuccess(AiClient.Action action) {
+                          runOnUiThread(() -> {
+                              String toolResult = PhoneTools.execute(MainActivity.this, action);
+                              String spoken = action.response == null ? "" : action.response.trim();
+
+                              if (!toolResult.isEmpty()) {
+                                  if (spoken.isEmpty() ||
+                                          !toolResult.toLowerCase(Locale.ROOT)
+                                                  .contains(spoken.toLowerCase(Locale.ROOT))) {
+                                      spoken = toolResult;
+                                  }
+                              }
+                              if (spoken.isEmpty()) spoken = "Done.";
+
+                              conversation.setText("YOU: " + userText +
+                                      "\n\nIMAN: " + spoken +
+                                      "\n\nACTION: " + action.action +
+                                      (action.argument.isEmpty() ? "" : " → " + action.argument));
+                              status.setText("READY • ONLINE AI");
+                              ConversationMemory.add(MainActivity.this, "assistant", spoken);
+                              speak(spoken);
+                          });
+                      }
+
+                      @Override public void onError(String error) {
+                          runOnUiThread(() -> {
+                              conversation.setText("YOU: " + userText +
+                                      "\n\nIMAN ERROR: " + error);
+                              status.setText("AI CONNECTION ERROR");
+                              if (error.contains("key is not set")) showApiKeyDialog();
+                          });
+                      }
+                  });
+              }
+
+              private void speak(String s) {
+                  if (tts != null) {
+                      tts.speak(s, TextToSpeech.QUEUE_FLUSH, null, "iman_reply");
+                  }
+              }
+
+              private void showApiKeyDialog() {
+                  EditText input = new EditText(this);
+                  input.setHint("sk-...");
+                  input.setInputType(InputType.TYPE_CLASS_TEXT |
+                          InputType.TYPE_TEXT_VARIATION_PASSWORD);
+
+                  new AlertDialog.Builder(this)
+                          .setTitle("Connect IMAN to the online AI brain")
+                          .setMessage("Paste your OpenAI API key. It will be encrypted on this phone.")
+                          .setView(input)
+                          .setPositiveButton("SAVE", (d, w) -> {
+                              String k = input.getText().toString().trim();
+                              if (k.isEmpty()) return;
+                              try {
+                                  SecureKeyStore.save(this, k);
+                                  status.setText("READY • ONLINE AI");
+                                  Toast.makeText(this, "AI key saved securely.", Toast.LENGTH_SHORT).show();
+                              } catch (Exception e) {
+                                  Toast.makeText(this, "Could not save key: " + e.getMessage(),
+                                          Toast.LENGTH_LONG).show();
+                              }
+                          })
+                          .setNegativeButton("LATER", null)
+                          .show();
+              }
+
+              private void requestPermissionsIfNeeded() {
+                  List<String> p = new ArrayList<>();
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+                      p.add(Manifest.permission.RECORD_AUDIO);
+                  if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED)
+                      p.add(Manifest.permission.READ_CONTACTS);
+                  if (checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED)
+                      p.add(Manifest.permission.CALL_PHONE);
+                  if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
+                      p.add(Manifest.permission.CAMERA);
+
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      if (checkSelfPermission(Manifest.permission.READ_MEDIA_AUDIO) != PackageManager.PERMISSION_GRANTED)
+                          p.add(Manifest.permission.READ_MEDIA_AUDIO);
+                      if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                          p.add(Manifest.permission.POST_NOTIFICATIONS);
+                  } else {
+                      if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
+                          p.add(Manifest.permission.READ_EXTERNAL_STORAGE);
+                  }
+
+                  if (!p.isEmpty()) requestPermissions(p.toArray(new String[0]), PERM_REQ);
+              }
+
+              private TextView text(String s, int sp, int color, boolean bold) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextSize(sp);
+                  t.setTextColor(color);
+                  if (bold) t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                  return t;
+              }
+
+              private Button button(String s) {
+                  Button b = new Button(this);
+                  b.setText(s);
+                  b.setAllCaps(false);
+                  return b;
+              }
+
+              private LinearLayout.LayoutParams full() {
+                  return new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT);
+              }
+
+              private LinearLayout.LayoutParams top(int m) {
+                  LinearLayout.LayoutParams p = full();
+                  p.setMargins(0, dp(m), 0, 0);
+                  return p;
+              }
+
+              private LinearLayout.LayoutParams weight() {
+                  return new LinearLayout.LayoutParams(
+                          0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+              }
+
+              private int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+          }
+          EOF
+
+          cd "$P"
+          gradle :app:assembleDebug --no-daemon
+
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             "$GITHUB_WORKSPACE/out/IMAN-AI-PHONE-ROBOT-v1.apk"
+
+      - name: Verify APK
+        run: |
+          set -e
+          APK="out/IMAN-AI-PHONE-ROBOT-v1.apk"
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | head -20
+          sha256sum "$APK" | tee out/SHA256.txt
+
+      - name: Upload verified APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: IMAN-AI-PHONE-ROBOT-v1
+          path: |
+            out/IMAN-AI-PHONE-ROBOT-v1.apk
+            out/SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
