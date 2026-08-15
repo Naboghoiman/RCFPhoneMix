@@ -1,0 +1,1209 @@
+name: Build RCF djay Bridge v13 CLEAN
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/RCF_DJAY_BRIDGE_V13_CLEAN.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate clean Android bridge project
+        run: |
+          set -euo pipefail
+          P="$RUNNER_TEMP/rcf-djay-bridge"
+          rm -rf "$P"
+          mkdir -p "$P/app/src/main/java/com/iman/rcfdjaybridge" "$P/app/src/main/res/xml"
+          cat > "$P/settings.gradle" <<'FILE_0_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          
+          rootProject.name = 'RcfDjayBridge'
+          include ':app'
+          FILE_0_EOF
+
+          cat > "$P/build.gradle" <<'FILE_1_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          FILE_1_EOF
+
+          cat > "$P/gradle.properties" <<'FILE_2_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          FILE_2_EOF
+
+          cat > "$P/app/build.gradle" <<'FILE_3_EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          
+          android {
+              namespace 'com.iman.rcfdjaybridge'
+              compileSdk 35
+          
+              defaultConfig {
+                  applicationId 'com.iman.rcfdjaybridge'
+                  minSdk 23
+                  targetSdk 33
+                  versionCode 13
+                  versionName '13.0-clean-learn'
+              }
+          
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          FILE_3_EOF
+
+          cat > "$P/app/src/main/AndroidManifest.xml" <<'FILE_4_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-feature android:name="android.software.midi" android:required="false" />
+          
+              <application
+                  android:allowBackup="true"
+                  android:label="RCF djay Bridge"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+          
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+          
+                  <service
+                      android:name=".BridgeVpnService"
+                      android:exported="false"
+                      android:permission="android.permission.BIND_VPN_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.net.VpnService" />
+                      </intent-filter>
+                  </service>
+          
+                  <service
+                      android:name=".RcfMidiDeviceService"
+                      android:label="Hercules DJControl MIX"
+                      android:permission="android.permission.BIND_MIDI_DEVICE_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.media.midi.MidiDeviceService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.media.midi.MidiDeviceService"
+                          android:resource="@xml/midi_device_info" />
+                  </service>
+              </application>
+          </manifest>
+          FILE_4_EOF
+
+          cat > "$P/app/src/main/res/xml/midi_device_info.xml" <<'FILE_5_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <devices>
+              <device manufacturer="Hercules" product="DJControl MIX">
+                  <input-port name="DJControl MIX MIDI In" />
+                  <output-port name="DJControl MIX MIDI Out" />
+              </device>
+          </devices>
+          FILE_5_EOF
+
+          cat > "$P/app/src/main/java/com/iman/rcfdjaybridge/MainActivity.java" <<'FILE_6_EOF'
+          package com.iman.rcfdjaybridge;
+          
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.net.VpnService;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          
+          public class MainActivity extends Activity {
+              private static final int PREPARE_VPN = 7101;
+              private static final int NOTIFY_PERMISSION = 7102;
+          
+              private final Handler handler = new Handler(Looper.getMainLooper());
+              private TextView bridgeStatus;
+              private TextView midiStatus;
+              private TextView rcfStatus;
+              private TextView learnStatus;
+              private TextView mappingsStatus;
+          
+              private final Runnable tick = new Runnable() {
+                  @Override public void run() {
+                      if (bridgeStatus != null) bridgeStatus.setText(BridgeVpnService.vpnStatus);
+                      if (midiStatus != null) midiStatus.setText(RcfMidiDeviceService.midiStatus);
+                      if (rcfStatus != null) rcfStatus.setText(BridgeVpnService.oscStatus);
+                      if (learnStatus != null) learnStatus.setText(RcfMidiMapper.learnStatus(MainActivity.this));
+                      if (mappingsStatus != null) mappingsStatus.setText(RcfMidiMapper.mappingSummary(MainActivity.this));
+                      handler.postDelayed(this, 400L);
+                  }
+              };
+          
+              @Override protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  buildUi();
+                  requestNotificationPermissionIfNeeded();
+              }
+          
+              @Override protected void onResume() {
+                  super.onResume();
+                  handler.removeCallbacks(tick);
+                  handler.post(tick);
+              }
+          
+              @Override protected void onPause() {
+                  handler.removeCallbacks(tick);
+                  super.onPause();
+              }
+          
+              private void buildUi() {
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setBackgroundColor(Color.rgb(16, 18, 22));
+          
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(18), dp(18), dp(18), dp(28));
+          
+                  TextView title = text("RCF → djay MIDI BRIDGE", 23, Color.WHITE, true);
+                  title.setGravity(Gravity.CENTER);
+                  root.addView(title, full());
+          
+                  TextView sub = text("PURE BRIDGE • NO MUSIC PLAYER • HERCULES DJCONTROL MIX MIDI", 11, Color.rgb(80, 190, 240), true);
+                  sub.setGravity(Gravity.CENTER);
+                  sub.setPadding(0, dp(5), 0, dp(16));
+                  root.addView(sub, full());
+          
+                  Button start = button("START RCF BRIDGE");
+                  start.setOnClickListener(v -> prepareVpn());
+                  root.addView(start, height(54));
+          
+                  root.addView(heading("BRIDGE"), top(12));
+                  bridgeStatus = status("Bridge stopped");
+                  root.addView(bridgeStatus, full());
+          
+                  root.addView(heading("DJAY MIDI"), top(10));
+                  midiStatus = status("Virtual MIDI registered — open djay MIDI devices");
+                  root.addView(midiStatus, full());
+          
+                  LinearLayout tests = new LinearLayout(this);
+                  tests.setOrientation(LinearLayout.HORIZONTAL);
+                  Button testA = button("TEST PLAY A");
+                  testA.setOnClickListener(v -> RcfMidiDeviceService.testPlayA());
+                  tests.addView(testA, weight());
+                  Button testB = button("TEST PLAY B");
+                  testB.setOnClickListener(v -> RcfMidiDeviceService.testPlayB());
+                  LinearLayout.LayoutParams wb = weight();
+                  wb.setMargins(dp(8), 0, 0, 0);
+                  tests.addView(testB, wb);
+                  root.addView(tests, top(8));
+          
+                  root.addView(heading("LAST RCF COMMAND"), top(12));
+                  rcfStatus = status("Waiting for MixRemote controls…");
+                  root.addView(rcfStatus, full());
+          
+                  root.addView(heading("LEARN MODE"), top(14));
+                  TextView help = text(
+                          "Tap a LEARN button, then move or press the RCF control you want to use. " +
+                          "The bridge remembers that RCF control and sends the matching Hercules command to djay.",
+                          13, Color.LTGRAY, false);
+                  root.addView(help, full());
+          
+                  learnStatus = status("No learn target selected");
+                  root.addView(learnStatus, top(7));
+          
+                  addLearn(root, "LEARN CROSSFADER", RcfMidiMapper.F_CROSSFADER);
+                  addLearn(root, "LEARN MASTER VOLUME", RcfMidiMapper.F_MASTER_VOLUME);
+                  addLearn(root, "LEARN DECK A VOLUME", RcfMidiMapper.F_DECK_A_VOLUME);
+                  addLearn(root, "LEARN DECK B VOLUME", RcfMidiMapper.F_DECK_B_VOLUME);
+                  addLearn(root, "LEARN DECK A FILTER", RcfMidiMapper.F_DECK_A_FILTER);
+                  addLearn(root, "LEARN DECK B FILTER", RcfMidiMapper.F_DECK_B_FILTER);
+                  addLearn(root, "LEARN DECK A BASS", RcfMidiMapper.F_DECK_A_EQ_LOW);
+                  addLearn(root, "LEARN DECK B BASS", RcfMidiMapper.F_DECK_B_EQ_LOW);
+                  addLearn(root, "LEARN PLAY A", RcfMidiMapper.F_PLAY_A);
+                  addLearn(root, "LEARN PLAY B", RcfMidiMapper.F_PLAY_B);
+                  addLearn(root, "LEARN CUE A", RcfMidiMapper.F_CUE_A);
+                  addLearn(root, "LEARN CUE B", RcfMidiMapper.F_CUE_B);
+                  addLearn(root, "LEARN SYNC A", RcfMidiMapper.F_SYNC_A);
+                  addLearn(root, "LEARN SYNC B", RcfMidiMapper.F_SYNC_B);
+          
+                  root.addView(heading("SAVED MAPPINGS"), top(14));
+                  mappingsStatus = status("No mappings saved yet");
+                  mappingsStatus.setTypeface(android.graphics.Typeface.MONOSPACE);
+                  root.addView(mappingsStatus, full());
+          
+                  Button clear = button("CLEAR ALL LEARNED MAPPINGS");
+                  clear.setOnClickListener(v -> {
+                      RcfMidiMapper.clearMappings(this);
+                      Toast.makeText(this, "Learned mappings cleared", Toast.LENGTH_SHORT).show();
+                  });
+                  root.addView(clear, top(10));
+          
+                  TextView instructions = text(
+                          "USE: 1) Start RCF Bridge and allow the Android VPN prompt. " +
+                          "2) Open the original RCF MixRemote. The bridge pretends to be the M18 so RCF commands reach this phone. " +
+                          "3) In djay, open Settings → MIDI Devices and choose Hercules DJControl MIX if it appears. " +
+                          "4) Tap TEST PLAY A. If Deck A responds, MIDI is connected. " +
+                          "5) Return here, choose a LEARN function, then move the desired RCF control.",
+                          12, Color.GRAY, false);
+                  instructions.setPadding(0, dp(18), 0, 0);
+                  root.addView(instructions, full());
+          
+                  scroll.addView(root);
+                  setContentView(scroll);
+              }
+          
+              private void addLearn(LinearLayout root, String label, String function) {
+                  Button b = button(label);
+                  b.setOnClickListener(v -> {
+                      RcfMidiMapper.requestLearn(this, function);
+                      Toast.makeText(this, "Now move/press the RCF control", Toast.LENGTH_SHORT).show();
+                  });
+                  root.addView(b, top(7));
+              }
+          
+              private void prepareVpn() {
+                  Intent permission = VpnService.prepare(this);
+                  if (permission != null) startActivityForResult(permission, PREPARE_VPN);
+                  else startBridgeService();
+              }
+          
+              private void startBridgeService() {
+                  Intent i = new Intent(this, BridgeVpnService.class);
+                  i.setAction(BridgeVpnService.ACTION_START);
+                  if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+              }
+          
+              @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode == PREPARE_VPN) {
+                      if (resultCode == RESULT_OK) startBridgeService();
+                      else Toast.makeText(this, "VPN permission is required to receive MixRemote commands", Toast.LENGTH_LONG).show();
+                  }
+              }
+          
+              private void requestNotificationPermissionIfNeeded() {
+                  if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFY_PERMISSION);
+                  }
+              }
+          
+              private TextView heading(String s) {
+                  TextView t = text(s, 12, Color.rgb(80, 190, 240), true);
+                  t.setPadding(0, dp(8), 0, dp(4));
+                  return t;
+              }
+          
+              private TextView status(String s) {
+                  TextView t = text(s, 13, Color.WHITE, false);
+                  t.setBackgroundColor(Color.rgb(32, 35, 41));
+                  t.setPadding(dp(10), dp(10), dp(10), dp(10));
+                  return t;
+              }
+          
+              private TextView text(String s, int sp, int color, boolean bold) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextSize(sp);
+                  t.setTextColor(color);
+                  if (bold) t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                  return t;
+              }
+          
+              private Button button(String s) {
+                  Button b = new Button(this);
+                  b.setText(s);
+                  b.setAllCaps(false);
+                  return b;
+              }
+          
+              private LinearLayout.LayoutParams full() {
+                  return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+              }
+          
+              private LinearLayout.LayoutParams height(int h) {
+                  return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(h));
+              }
+          
+              private LinearLayout.LayoutParams top(int px) {
+                  LinearLayout.LayoutParams p = full();
+                  p.setMargins(0, dp(px), 0, 0);
+                  return p;
+              }
+          
+              private LinearLayout.LayoutParams weight() {
+                  return new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+              }
+          
+              private int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+          }
+          FILE_6_EOF
+
+          cat > "$P/app/src/main/java/com/iman/rcfdjaybridge/RcfMidiDeviceService.java" <<'FILE_7_EOF'
+          package com.iman.rcfdjaybridge;
+          
+          import android.media.midi.MidiDeviceService;
+          import android.media.midi.MidiDeviceStatus;
+          import android.media.midi.MidiReceiver;
+          
+          import java.io.IOException;
+          import java.util.Locale;
+          
+          /**
+           * Android virtual MIDI 1.0 device that presents itself as a Hercules DJControl MIX.
+           * MIDI numbers follow the Hercules DJControl MIX mapping used by supported DJ software.
+           */
+          public final class RcfMidiDeviceService extends MidiDeviceService {
+              public static volatile String midiStatus = "Virtual Hercules MIDI registered — open djay MIDI Devices";
+              private static volatile RcfMidiDeviceService instance;
+              private static volatile int clientCount;
+          
+              private final MidiReceiver inputSink = new MidiReceiver() {
+                  @Override public void onSend(byte[] msg, int offset, int count, long timestamp) {
+                      if (msg != null && count > 0) {
+                          midiStatus = "djay/controller feedback received • " + count + " MIDI bytes";
+                      }
+                  }
+              };
+          
+              @Override public void onCreate() {
+                  super.onCreate();
+                  instance = this;
+                  midiStatus = "Virtual Hercules MIDI ACTIVE — waiting for djay to open it";
+              }
+          
+              @Override public void onDestroy() {
+                  if (instance == this) instance = null;
+                  clientCount = 0;
+                  midiStatus = "Virtual Hercules MIDI service idle";
+                  super.onDestroy();
+              }
+          
+              @Override public MidiReceiver[] onGetInputPortReceivers() {
+                  return new MidiReceiver[]{inputSink};
+              }
+          
+              @Override public void onDeviceStatusChanged(MidiDeviceStatus status) {
+                  clientCount = status == null ? 0 : status.getOutputPortOpenCount(0);
+                  if (clientCount > 0) {
+                      midiStatus = "DJAY MIDI CONNECTED • " + clientCount + " client(s) listening";
+                  } else {
+                      midiStatus = "Virtual Hercules MIDI ACTIVE — open it in djay";
+                  }
+              }
+          
+              public static boolean isClientConnected() {
+                  return clientCount > 0;
+              }
+          
+              private static boolean send3(int status, int data1, int data2, String label) {
+                  RcfMidiDeviceService s = instance;
+                  if (s == null) {
+                      midiStatus = "MIDI not opened yet — in djay choose Hercules DJControl MIX";
+                      return false;
+                  }
+                  MidiReceiver[] receivers = s.getOutputPortReceivers();
+                  if (receivers == null || receivers.length == 0 || receivers[0] == null) {
+                      midiStatus = "Hercules device exists, but djay has not opened its MIDI OUT port";
+                      return false;
+                  }
+                  byte[] m = new byte[]{(byte)status, (byte)(data1 & 0x7F), (byte)(data2 & 0x7F)};
+                  try {
+                      receivers[0].send(m, 0, m.length, System.nanoTime());
+                      midiStatus = label + " → " + String.format(Locale.US, "%02X %02X %02X", status & 0xFF, data1 & 0x7F, data2 & 0x7F);
+                      return true;
+                  } catch (IOException e) {
+                      midiStatus = "MIDI send error: " + (e.getMessage() == null ? "unknown" : e.getMessage());
+                      return false;
+                  }
+              }
+          
+              private static void notePulse(int status, int note, String label) {
+                  if (send3(status, note, 0x7F, label + " press")) {
+                      send3(status, note, 0x00, label + " release");
+                  }
+              }
+          
+              private static void cc(int status, int controller, float value, String label) {
+                  float v = Math.max(0f, Math.min(1f, value));
+                  int data = Math.max(0, Math.min(127, Math.round(v * 127f)));
+                  send3(status, controller, data, label);
+              }
+          
+              public static void testPlayA() { notePulse(0x91, 0x07, "TEST PLAY A"); }
+              public static void testPlayB() { notePulse(0x92, 0x07, "TEST PLAY B"); }
+          
+              public static void sendContinuous(String function, float value) {
+                  switch (function) {
+                      case RcfMidiMapper.F_CROSSFADER:
+                          cc(0xB0, 0x00, value, "Crossfader"); break;
+                      case RcfMidiMapper.F_MASTER_VOLUME:
+                          cc(0xB0, 0x03, value, "Master volume"); break;
+                      case RcfMidiMapper.F_HEADPHONE_VOLUME:
+                          cc(0xB0, 0x04, value, "Headphone volume"); break;
+                      case RcfMidiMapper.F_DECK_A_VOLUME:
+                          cc(0xB1, 0x00, value, "Deck A volume"); break;
+                      case RcfMidiMapper.F_DECK_A_FILTER:
+                          cc(0xB1, 0x01, value, "Deck A filter"); break;
+                      case RcfMidiMapper.F_DECK_A_EQ_LOW:
+                          cc(0xB1, 0x02, value, "Deck A bass"); break;
+                      case RcfMidiMapper.F_DECK_B_VOLUME:
+                          cc(0xB2, 0x00, value, "Deck B volume"); break;
+                      case RcfMidiMapper.F_DECK_B_FILTER:
+                          cc(0xB2, 0x01, value, "Deck B filter"); break;
+                      case RcfMidiMapper.F_DECK_B_EQ_LOW:
+                          cc(0xB2, 0x02, value, "Deck B bass"); break;
+                  }
+              }
+          
+              public static void sendButton(String function) {
+                  switch (function) {
+                      case RcfMidiMapper.F_PLAY_A:
+                          notePulse(0x91, 0x07, "Play A"); break;
+                      case RcfMidiMapper.F_CUE_A:
+                          notePulse(0x91, 0x06, "Cue A"); break;
+                      case RcfMidiMapper.F_SYNC_A:
+                          notePulse(0x91, 0x05, "Sync A"); break;
+                      case RcfMidiMapper.F_PFL_A:
+                          notePulse(0x91, 0x0C, "PFL A"); break;
+                      case RcfMidiMapper.F_PLAY_B:
+                          notePulse(0x92, 0x07, "Play B"); break;
+                      case RcfMidiMapper.F_CUE_B:
+                          notePulse(0x92, 0x06, "Cue B"); break;
+                      case RcfMidiMapper.F_SYNC_B:
+                          notePulse(0x92, 0x05, "Sync B"); break;
+                      case RcfMidiMapper.F_PFL_B:
+                          notePulse(0x92, 0x0C, "PFL B"); break;
+                  }
+              }
+          }
+          FILE_7_EOF
+
+          cat > "$P/app/src/main/java/com/iman/rcfdjaybridge/RcfMidiMapper.java" <<'FILE_8_EOF'
+          package com.iman.rcfdjaybridge;
+          
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          
+          import java.util.LinkedHashMap;
+          import java.util.Locale;
+          import java.util.Map;
+          import java.util.concurrent.ConcurrentHashMap;
+          
+          /** Learns RCF OSC addresses and translates them to Hercules DJControl MIX MIDI functions. */
+          public final class RcfMidiMapper {
+              private RcfMidiMapper() {}
+          
+              private static final String PREFS = "rcf_djay_mappings_v13";
+              private static final String PENDING = "pending_function";
+              private static final String PREFIX = "map.";
+          
+              public static final String F_CROSSFADER = "crossfader";
+              public static final String F_MASTER_VOLUME = "master_volume";
+              public static final String F_HEADPHONE_VOLUME = "headphone_volume";
+              public static final String F_DECK_A_VOLUME = "deck_a_volume";
+              public static final String F_DECK_B_VOLUME = "deck_b_volume";
+              public static final String F_DECK_A_FILTER = "deck_a_filter";
+              public static final String F_DECK_B_FILTER = "deck_b_filter";
+              public static final String F_DECK_A_EQ_LOW = "deck_a_bass";
+              public static final String F_DECK_B_EQ_LOW = "deck_b_bass";
+              public static final String F_PLAY_A = "play_a";
+              public static final String F_PLAY_B = "play_b";
+              public static final String F_CUE_A = "cue_a";
+              public static final String F_CUE_B = "cue_b";
+              public static final String F_SYNC_A = "sync_a";
+              public static final String F_SYNC_B = "sync_b";
+              public static final String F_PFL_A = "pfl_a";
+              public static final String F_PFL_B = "pfl_b";
+          
+              private static final Map<String, Float> lastValues = new ConcurrentHashMap<>();
+              private static volatile String lastLearned = "";
+          
+              private static final LinkedHashMap<String, String> LABELS = new LinkedHashMap<>();
+              static {
+                  LABELS.put(F_CROSSFADER, "Crossfader");
+                  LABELS.put(F_MASTER_VOLUME, "Master volume");
+                  LABELS.put(F_HEADPHONE_VOLUME, "Headphone volume");
+                  LABELS.put(F_DECK_A_VOLUME, "Deck A volume");
+                  LABELS.put(F_DECK_B_VOLUME, "Deck B volume");
+                  LABELS.put(F_DECK_A_FILTER, "Deck A filter");
+                  LABELS.put(F_DECK_B_FILTER, "Deck B filter");
+                  LABELS.put(F_DECK_A_EQ_LOW, "Deck A bass");
+                  LABELS.put(F_DECK_B_EQ_LOW, "Deck B bass");
+                  LABELS.put(F_PLAY_A, "Play A");
+                  LABELS.put(F_PLAY_B, "Play B");
+                  LABELS.put(F_CUE_A, "Cue A");
+                  LABELS.put(F_CUE_B, "Cue B");
+                  LABELS.put(F_SYNC_A, "Sync A");
+                  LABELS.put(F_SYNC_B, "Sync B");
+                  LABELS.put(F_PFL_A, "PFL A");
+                  LABELS.put(F_PFL_B, "PFL B");
+              }
+          
+              public static void requestLearn(Context context, String function) {
+                  if (!LABELS.containsKey(function)) return;
+                  prefs(context).edit().putString(PENDING, function).apply();
+                  lastLearned = "Waiting for RCF control → " + label(function);
+              }
+          
+              public static String learnStatus(Context context) {
+                  String pending = prefs(context).getString(PENDING, "");
+                  if (pending != null && !pending.isEmpty()) return "LEARNING: " + label(pending) + " — move/press an RCF control now";
+                  if (lastLearned != null && !lastLearned.isEmpty()) return lastLearned;
+                  return "No learn target selected";
+              }
+          
+              public static void clearMappings(Context context) {
+                  SharedPreferences p = prefs(context);
+                  SharedPreferences.Editor e = p.edit();
+                  for (String f : LABELS.keySet()) e.remove(PREFIX + f);
+                  e.remove(PENDING).apply();
+                  lastValues.clear();
+                  lastLearned = "All learned mappings cleared";
+              }
+          
+              public static String mappingSummary(Context context) {
+                  SharedPreferences p = prefs(context);
+                  StringBuilder b = new StringBuilder();
+                  for (Map.Entry<String, String> entry : LABELS.entrySet()) {
+                      String a = p.getString(PREFIX + entry.getKey(), "");
+                      if (a != null && !a.isEmpty()) {
+                          if (b.length() > 0) b.append('\n');
+                          b.append(entry.getValue()).append(" ← ").append(a);
+                      }
+                  }
+                  return b.length() == 0 ? "No mappings saved yet" : b.toString();
+              }
+          
+              public static void onRcfOsc(Context context, String address, float rawValue) {
+                  if (address == null || isProtocolNoise(address)) return;
+                  SharedPreferences p = prefs(context);
+          
+                  String pending = p.getString(PENDING, "");
+                  if (pending != null && !pending.isEmpty() && LABELS.containsKey(pending)) {
+                      p.edit().putString(PREFIX + pending, address).remove(PENDING).apply();
+                      lastLearned = "SAVED: " + label(pending) + " ← " + address;
+                      lastValues.put(address, rawValue);
+                      return;
+                  }
+          
+                  float value = normalize(rawValue);
+                  for (String function : LABELS.keySet()) {
+                      String mapped = p.getString(PREFIX + function, "");
+                      if (address.equals(mapped)) {
+                          if (isButton(function)) {
+                              float previous = lastValues.containsKey(address) ? lastValues.get(address) : 0f;
+                              if (value >= 0.5f && previous < 0.5f) RcfMidiDeviceService.sendButton(function);
+                          } else {
+                              RcfMidiDeviceService.sendContinuous(function, value);
+                          }
+                      }
+                  }
+                  lastValues.put(address, value);
+              }
+          
+              private static boolean isButton(String f) {
+                  return F_PLAY_A.equals(f) || F_PLAY_B.equals(f) || F_CUE_A.equals(f) || F_CUE_B.equals(f)
+                          || F_SYNC_A.equals(f) || F_SYNC_B.equals(f) || F_PFL_A.equals(f) || F_PFL_B.equals(f);
+              }
+          
+              private static boolean isProtocolNoise(String a) {
+                  return a.contains("/pl_") || a.contains("/up_") || a.contains("/vmeter_") || a.contains("/vm_");
+              }
+          
+              private static float normalize(float v) {
+                  if (Float.isNaN(v) || Float.isInfinite(v)) return 0f;
+                  if (v >= 0f && v <= 1f) return v;
+                  // Graceful fallback for controls that expose dB-like values rather than normalized 0..1.
+                  if (v < 0f) return Math.max(0f, Math.min(1f, (v + 60f) / 60f));
+                  return Math.max(0f, Math.min(1f, v / 127f));
+              }
+          
+              private static String label(String f) {
+                  String s = LABELS.get(f);
+                  return s == null ? f : s;
+              }
+          
+              private static SharedPreferences prefs(Context context) {
+                  return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+              }
+          }
+          FILE_8_EOF
+
+          cat > "$P/app/src/main/java/com/iman/rcfdjaybridge/BridgeVpnService.java" <<'FILE_9_EOF'
+          package com.iman.rcfdjaybridge;
+          
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.net.VpnService;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.os.ParcelFileDescriptor;
+          
+          import java.io.ByteArrayOutputStream;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.IOException;
+          import java.nio.ByteBuffer;
+          import java.nio.ByteOrder;
+          import java.nio.charset.StandardCharsets;
+          import java.util.ArrayDeque;
+          import java.util.ArrayList;
+          import java.util.LinkedHashMap;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Map;
+          
+          /**
+           * Captures only the original RCF MixRemote app through Android VpnService.
+           * It emulates enough of the M18 OSC endpoint for MixRemote to stay connected,
+           * then forwards real control changes to RcfMidiMapper.
+           */
+          public final class BridgeVpnService extends VpnService {
+              public static final String ACTION_START = "com.iman.rcfdjaybridge.START";
+          
+              public static volatile String vpnStatus = "Bridge stopped";
+              public static volatile String oscStatus = "Waiting for MixRemote controls…";
+              public static volatile String recentOscLog = "No RCF commands yet";
+          
+              private static final int NOTIFICATION_ID = 1313;
+              private static final String CHANNEL_ID = "rcf_djay_bridge";
+              private static final String STATE_PREFS = "rcf_m18_state_v13";
+              private static final ArrayDeque<String> RECENT = new ArrayDeque<>();
+          
+              private ParcelFileDescriptor tun;
+              private Thread packetThread;
+              private volatile boolean running;
+              private int packetId = 1;
+              private SharedPreferences prefs;
+              private final Map<String, Float> state = new LinkedHashMap<>();
+          
+              @Override public void onCreate() {
+                  super.onCreate();
+                  prefs = getSharedPreferences(STATE_PREFS, MODE_PRIVATE);
+                  initDefaultState();
+                  restoreSavedState();
+              }
+          
+              @Override public IBinder onBind(Intent intent) {
+                  return super.onBind(intent);
+              }
+          
+              @Override public int onStartCommand(Intent intent, int flags, int startId) {
+                  startForegroundNow();
+                  if (intent != null && ACTION_START.equals(intent.getAction())) startVpn();
+                  return START_STICKY;
+              }
+          
+              private void startForegroundNow() {
+                  NotificationManager nm = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "RCF djay Bridge", NotificationManager.IMPORTANCE_LOW);
+                      nm.createNotificationChannel(channel);
+                  }
+                  Intent open = new Intent(this, MainActivity.class);
+                  int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+                  if (Build.VERSION.SDK_INT >= 23) piFlags |= PendingIntent.FLAG_IMMUTABLE;
+                  PendingIntent pi = PendingIntent.getActivity(this, 0, open, piFlags);
+                  Notification.Builder b = Build.VERSION.SDK_INT >= 26
+                          ? new Notification.Builder(this, CHANNEL_ID)
+                          : new Notification.Builder(this);
+                  b.setSmallIcon(android.R.drawable.stat_sys_upload)
+                          .setContentTitle("RCF → djay Bridge")
+                          .setContentText("Listening for RCF MixRemote controls")
+                          .setContentIntent(pi)
+                          .setOngoing(true);
+                  startForeground(NOTIFICATION_ID, b.build());
+              }
+          
+              private synchronized void startVpn() {
+                  if (tun != null) {
+                      vpnStatus = "RCF bridge ACTIVE — open MixRemote";
+                      return;
+                  }
+                  try {
+                      Builder builder = new Builder()
+                              .setSession("RCF → djay MIDI Bridge")
+                              .setMtu(1500)
+                              .addAddress("10.77.0.1", 32)
+                              .addRoute("0.0.0.0", 0);
+          
+                      try {
+                          builder.addAllowedApplication("com.rcf.mixremote");
+                      } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+                          vpnStatus = "Original RCF MixRemote not found on this phone";
+                          return;
+                      }
+          
+                      if (Build.VERSION.SDK_INT >= 21) builder.setBlocking(true);
+                      tun = builder.establish();
+                      if (tun == null) {
+                          vpnStatus = "VPN permission was not granted";
+                          return;
+                      }
+          
+                      running = true;
+                      packetThread = new Thread(this::packetLoop, "RCF-MixRemote-VPN");
+                      packetThread.start();
+                      vpnStatus = "RCF bridge ACTIVE — now open original MixRemote";
+                  } catch (Exception e) {
+                      vpnStatus = "Bridge error: " + safe(e.getMessage());
+                  }
+              }
+          
+              private void packetLoop() {
+                  try (FileInputStream in = new FileInputStream(tun.getFileDescriptor());
+                       FileOutputStream out = new FileOutputStream(tun.getFileDescriptor())) {
+                      byte[] buffer = new byte[32767];
+                      while (running) {
+                          int n = in.read(buffer);
+                          if (n > 0) handleIpPacket(buffer, n, out);
+                      }
+                  } catch (Exception e) {
+                      if (running) vpnStatus = "Bridge packet error: " + safe(e.getMessage());
+                  }
+              }
+          
+              private void handleIpPacket(byte[] packet, int len, FileOutputStream out) throws IOException {
+                  if (len < 28) return;
+                  int version = (packet[0] >> 4) & 0x0F;
+                  if (version != 4) return;
+                  int ihl = (packet[0] & 0x0F) * 4;
+                  if (ihl < 20 || len < ihl + 8) return;
+                  if ((packet[9] & 0xFF) != 17) return; // UDP only
+          
+                  int udpLength = u16(packet, ihl + 4);
+                  int payloadOffset = ihl + 8;
+                  int payloadLength = Math.min(Math.max(0, udpLength - 8), len - payloadOffset);
+                  if (payloadLength <= 0) return;
+          
+                  byte[] srcIp = new byte[]{packet[12], packet[13], packet[14], packet[15]};
+                  byte[] dstIp = new byte[]{packet[16], packet[17], packet[18], packet[19]};
+          
+                  List<OscMessage> messages = new ArrayList<>();
+                  parseOsc(packet, payloadOffset, payloadLength, messages);
+                  for (OscMessage message : messages) {
+                      onOsc(message);
+                      byte[] reply = createReply(message);
+                      if (reply != null) {
+                          // RCF M18 uses mixer UDP 8000 -> MixRemote UDP 9000 for replies.
+                          byte[] ipReply = buildUdpIpv4(dstIp, srcIp, 8000, 9000, reply);
+                          out.write(ipReply);
+                          out.flush();
+                      }
+                  }
+              }
+          
+              private void onOsc(OscMessage m) {
+                  if (!isPollingNoise(m.address)) {
+                      String line = m.address + valueText(m);
+                      oscStatus = "RCF → bridge: " + line;
+                      appendRecent(line);
+                  }
+                  if (m.firstFloat != null && !isProtocolOnly(m.address)) {
+                      float value = m.firstFloat;
+                      state.put(m.address, value);
+                      persistStateValue(m.address, value);
+                      RcfMidiMapper.onRcfOsc(this, m.address, value);
+                  }
+              }
+          
+              private byte[] createReply(OscMessage m) {
+                  // M18 identity/firmware replies used by MixRemote during startup.
+                  if ("/22/00/gb_100".equals(m.address)) return oscStringReply(m.address, "02.10.0225");
+                  if ("/22/00/gb_146".equals(m.address)) return oscStringReply(m.address, "0");
+                  if ("/22/00/gb_275".equals(m.address)) return oscStringReply(m.address, "RCFDJAY001");
+                  if ("/27/00/gb_078".equals(m.address) || "/27/00/gb_78".equals(m.address)) return oscStringReply(m.address, "");
+          
+                  // Quiet meter frame keeps polling alive without pretending to have real hardware meters.
+                  if ("/00/00/pl_000".equals(m.address)) return oscMeterReply();
+          
+                  AddressParts parts = AddressParts.parse(m.address);
+                  if (parts != null && "up".equals(parts.section)) {
+                      return stateBundleFor(parts.page, parts.channel); // may be an empty valid bundle
+                  }
+          
+                  // Acknowledge control writes so MixRemote sliders/buttons stay visually synchronized.
+                  if (m.firstFloat != null && !isProtocolOnly(m.address)) return oscFloatReply(m.address, m.firstFloat);
+                  if (m.firstString != null && !isProtocolOnly(m.address)) return oscStringReply(m.address, m.firstString);
+                  return null;
+              }
+          
+              private byte[] stateBundleFor(int page, int channel) {
+                  String prefix = String.format(Locale.US, "/%02d/%02d/", page, channel);
+                  List<byte[]> entries = new ArrayList<>();
+                  for (Map.Entry<String, Float> e : state.entrySet()) {
+                      if (e.getKey().startsWith(prefix)) entries.add(oscFloatReply(e.getKey(), e.getValue()));
+                  }
+                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                  writeOscString(out, "#bundle");
+                  writeInt(out, 0);
+                  writeInt(out, 1); // immediate timetag
+                  for (byte[] msg : entries) {
+                      writeInt(out, msg.length);
+                      out.write(msg, 0, msg.length);
+                  }
+                  return out.toByteArray();
+              }
+          
+              private void initDefaultState() {
+                  state.clear();
+                  put(0, 0, "fd", 0, 1f); // MAIN
+                  put(0, 0, "mt", 0, 0f);
+                  put(0, 0, "gq", 0, 1f);
+                  for (int i = 1; i <= 31; i++) put(0, 0, "gq", i, 0.5f);
+                  put(13, 0, "fd", 0, 1f); // PHONES
+                  put(22, 0, "gb", 70, 0f);
+                  put(22, 0, "gb", 79, 0f);
+              }
+          
+              private void put(int page, int channel, String section, int control, float value) {
+                  state.put(String.format(Locale.US, "/%02d/%02d/%s_%03d", page, channel, section, control), value);
+              }
+          
+              private void restoreSavedState() {
+                  if (prefs == null) return;
+                  for (Map.Entry<String, ?> e : prefs.getAll().entrySet()) {
+                      if (e.getValue() instanceof Float) state.put(e.getKey(), (Float)e.getValue());
+                  }
+              }
+          
+              private void persistStateValue(String address, float value) {
+                  if (prefs != null && address != null) prefs.edit().putFloat(address, value).apply();
+              }
+          
+              private static boolean isPollingNoise(String address) {
+                  return address != null && (address.contains("/pl_") || address.contains("/vmeter_") || address.contains("/vm_"));
+              }
+          
+              private static boolean isProtocolOnly(String address) {
+                  return address == null || address.contains("/pl_") || address.contains("/up_") || address.contains("/vmeter_") || address.contains("/vm_");
+              }
+          
+              private static String valueText(OscMessage m) {
+                  if (m.firstFloat != null) return "  " + String.format(Locale.US, "%.4f", m.firstFloat);
+                  if (m.firstString != null) return "  \"" + m.firstString + "\"";
+                  return "";
+              }
+          
+              private static synchronized void appendRecent(String line) {
+                  if (line == null || line.isEmpty()) return;
+                  RECENT.addFirst(line);
+                  while (RECENT.size() > 10) RECENT.removeLast();
+                  StringBuilder b = new StringBuilder();
+                  for (String s : RECENT) {
+                      if (b.length() > 0) b.append('\n');
+                      b.append(s);
+                  }
+                  recentOscLog = b.toString();
+              }
+          
+              private byte[] oscStringReply(String address, String value) {
+                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                  writeOscString(out, address);
+                  writeOscString(out, ",s");
+                  writeOscString(out, value == null ? "" : value);
+                  return out.toByteArray();
+              }
+          
+              private byte[] oscFloatReply(String address, float value) {
+                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                  writeOscString(out, address);
+                  writeOscString(out, ",f");
+                  writeInt(out, Float.floatToIntBits(value));
+                  return out.toByteArray();
+              }
+          
+              private byte[] oscMeterReply() {
+                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                  writeOscString(out, "/00/00/vmeter_000");
+                  StringBuilder tags = new StringBuilder(",");
+                  for (int i = 0; i < 41; i++) tags.append('f');
+                  writeOscString(out, tags.toString());
+                  for (int i = 0; i < 41; i++) writeInt(out, Float.floatToIntBits(0f));
+                  return out.toByteArray();
+              }
+          
+              private void parseOsc(byte[] data, int off, int len, List<OscMessage> out) {
+                  if (len <= 0 || off < 0 || off + len > data.length) return;
+                  if (len >= 16 && starts(data, off, "#bundle")) {
+                      int pos = off + 16;
+                      int end = off + len;
+                      while (pos + 4 <= end) {
+                          int size = readInt(data, pos);
+                          pos += 4;
+                          if (size <= 0 || pos + size > end) break;
+                          parseOsc(data, pos, size, out);
+                          pos += size;
+                      }
+                      return;
+                  }
+          
+                  OscString address = readOscString(data, off, off + len);
+                  if (address == null || !address.value.startsWith("/")) return;
+                  OscString tags = readOscString(data, address.next, off + len);
+                  if (tags == null || !tags.value.startsWith(",")) return;
+                  int pos = tags.next;
+                  Float firstFloat = null;
+                  String firstString = null;
+          
+                  for (int i = 1; i < tags.value.length(); i++) {
+                      char t = tags.value.charAt(i);
+                      if (t == 'f' && pos + 4 <= off + len) {
+                          float f = Float.intBitsToFloat(readInt(data, pos));
+                          if (firstFloat == null) firstFloat = f;
+                          pos += 4;
+                      } else if (t == 'i' && pos + 4 <= off + len) {
+                          int iv = readInt(data, pos);
+                          if (firstFloat == null) firstFloat = (float)iv;
+                          pos += 4;
+                      } else if (t == 'd' && pos + 8 <= off + len) {
+                          double dv = ByteBuffer.wrap(data, pos, 8).order(ByteOrder.BIG_ENDIAN).getDouble();
+                          if (firstFloat == null) firstFloat = (float)dv;
+                          pos += 8;
+                      } else if (t == 'h' && pos + 8 <= off + len) {
+                          long lv = ByteBuffer.wrap(data, pos, 8).order(ByteOrder.BIG_ENDIAN).getLong();
+                          if (firstFloat == null) firstFloat = (float)lv;
+                          pos += 8;
+                      } else if (t == 's') {
+                          OscString s = readOscString(data, pos, off + len);
+                          if (s == null) return;
+                          if (firstString == null) firstString = s.value;
+                          pos = s.next;
+                      } else if (t == 'T') {
+                          if (firstFloat == null) firstFloat = 1f;
+                      } else if (t == 'F') {
+                          if (firstFloat == null) firstFloat = 0f;
+                      } else if (t == 'b' && pos + 4 <= off + len) {
+                          int n = readInt(data, pos);
+                          pos += 4;
+                          if (n < 0 || pos + n > off + len) return;
+                          pos = (pos + n + 3) & ~3;
+                      } else {
+                          break;
+                      }
+                  }
+                  out.add(new OscMessage(address.value, firstFloat, firstString));
+              }
+          
+              private byte[] buildUdpIpv4(byte[] src, byte[] dst, int srcPort, int dstPort, byte[] payload) {
+                  int total = 20 + 8 + payload.length;
+                  byte[] p = new byte[total];
+                  p[0] = 0x45;
+                  put16(p, 2, total);
+                  put16(p, 4, packetId++ & 0xFFFF);
+                  p[8] = 64;
+                  p[9] = 17;
+                  System.arraycopy(src, 0, p, 12, 4);
+                  System.arraycopy(dst, 0, p, 16, 4);
+                  put16(p, 20, srcPort);
+                  put16(p, 22, dstPort);
+                  put16(p, 24, 8 + payload.length);
+                  System.arraycopy(payload, 0, p, 28, payload.length);
+                  put16(p, 10, ipChecksum(p, 0, 20));
+                  return p;
+              }
+          
+              private int ipChecksum(byte[] b, int off, int len) {
+                  long sum = 0;
+                  for (int i = off; i < off + len; i += 2) {
+                      int word = (b[i] & 0xFF) << 8;
+                      if (i + 1 < off + len) word |= b[i + 1] & 0xFF;
+                      sum += word;
+                      while ((sum & 0xFFFF0000L) != 0) sum = (sum & 0xFFFFL) + (sum >>> 16);
+                  }
+                  return (int)(~sum) & 0xFFFF;
+              }
+          
+              @Override public void onDestroy() {
+                  running = false;
+                  if (tun != null) {
+                      try { tun.close(); } catch (Exception ignored) {}
+                      tun = null;
+                  }
+                  vpnStatus = "Bridge stopped";
+                  stopForeground(true);
+                  super.onDestroy();
+              }
+          
+              private static int u16(byte[] b, int p) {
+                  return ((b[p] & 0xFF) << 8) | (b[p + 1] & 0xFF);
+              }
+          
+              private static void put16(byte[] b, int p, int v) {
+                  b[p] = (byte)((v >>> 8) & 0xFF);
+                  b[p + 1] = (byte)(v & 0xFF);
+              }
+          
+              private static int readInt(byte[] b, int p) {
+                  return ByteBuffer.wrap(b, p, 4).order(ByteOrder.BIG_ENDIAN).getInt();
+              }
+          
+              private static void writeInt(ByteArrayOutputStream out, int v) {
+                  out.write((v >>> 24) & 0xFF);
+                  out.write((v >>> 16) & 0xFF);
+                  out.write((v >>> 8) & 0xFF);
+                  out.write(v & 0xFF);
+              }
+          
+              private static void writeOscString(ByteArrayOutputStream out, String s) {
+                  byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+                  out.write(bytes, 0, bytes.length);
+                  out.write(0);
+                  while ((out.size() & 3) != 0) out.write(0);
+              }
+          
+              private static OscString readOscString(byte[] b, int pos, int end) {
+                  if (pos < 0 || pos >= end) return null;
+                  int z = pos;
+                  while (z < end && b[z] != 0) z++;
+                  if (z >= end) return null;
+                  String s = new String(b, pos, z - pos, StandardCharsets.UTF_8);
+                  int next = (z + 4) & ~3;
+                  if (next > end) return null;
+                  return new OscString(s, next);
+              }
+          
+              private static boolean starts(byte[] b, int off, String s) {
+                  byte[] x = s.getBytes(StandardCharsets.US_ASCII);
+                  if (off + x.length > b.length) return false;
+                  for (int i = 0; i < x.length; i++) if (b[off + i] != x[i]) return false;
+                  return true;
+              }
+          
+              private static String safe(String s) { return s == null ? "unknown" : s; }
+          
+              private static final class OscString {
+                  final String value;
+                  final int next;
+                  OscString(String value, int next) { this.value = value; this.next = next; }
+              }
+          
+              private static final class OscMessage {
+                  final String address;
+                  final Float firstFloat;
+                  final String firstString;
+                  OscMessage(String address, Float firstFloat, String firstString) {
+                      this.address = address;
+                      this.firstFloat = firstFloat;
+                      this.firstString = firstString;
+                  }
+              }
+          
+              private static final class AddressParts {
+                  final int page;
+                  final int channel;
+                  final String section;
+                  AddressParts(int page, int channel, String section) {
+                      this.page = page;
+                      this.channel = channel;
+                      this.section = section;
+                  }
+                  static AddressParts parse(String address) {
+                      if (address == null || address.length() < 6 || address.charAt(0) != '/') return null;
+                      try {
+                          String[] p = address.split("/");
+                          if (p.length < 4) return null;
+                          int page = Integer.parseInt(p[1]);
+                          int channel = Integer.parseInt(p[2]);
+                          String section = p[3];
+                          int underscore = section.indexOf('_');
+                          if (underscore >= 0) section = section.substring(0, underscore);
+                          return new AddressParts(page, channel, section.toLowerCase(Locale.US));
+                      } catch (Exception e) {
+                          return null;
+                      }
+                  }
+              }
+          }
+          FILE_9_EOF
+
+          echo "PROJECT=$P" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        run: gradle -p "$PROJECT" :app:assembleDebug --stacktrace
+
+      - name: Verify APK
+        run: |
+          set -euo pipefail
+          APK="$PROJECT/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt2" dump badging "$APK" | head -25
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "$APK" "$RUNNER_TEMP/out/RCF-DJAY-BRIDGE-v13-CLEAN-LEARN.apk"
+          sha256sum "$RUNNER_TEMP/out/RCF-DJAY-BRIDGE-v13-CLEAN-LEARN.apk" > "$RUNNER_TEMP/out/RCF-DJAY-BRIDGE-v13-CLEAN-LEARN.sha256"
+
+      - name: Upload verified APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RCF-DJAY-BRIDGE-v13-CLEAN-LEARN
+          path: |
+            ${{ runner.temp }}/out/RCF-DJAY-BRIDGE-v13-CLEAN-LEARN.apk
+            ${{ runner.temp }}/out/RCF-DJAY-BRIDGE-v13-CLEAN-LEARN.sha256
+          if-no-files-found: error
+          retention-days: 30
