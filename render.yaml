@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: iman-ai-phone-robot
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: IMAN_APP_TOKEN
+        generateValue: true

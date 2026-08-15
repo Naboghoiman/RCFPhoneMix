@@ -1,0 +1,13 @@
+{
+  "name": "iman-ai-phone-robot-server",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "openai": "^5.19.1"
+  }
+}
