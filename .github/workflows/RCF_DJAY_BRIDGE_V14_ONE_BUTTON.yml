@@ -1,0 +1,752 @@
+name: Build RCF djay Bridge v14 ONE BUTTON
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/RCF_DJAY_BRIDGE_V14_ONE_BUTTON.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate one-button same-phone bridge
+        run: |
+          set -euo pipefail
+          export P="$RUNNER_TEMP/rcf-djay-v14"
+          rm -rf "$P"
+          mkdir -p "$P/app/src/main/java/com/iman/rcfdjaybridge" "$P/app/src/main/res/xml" "$P/app/src/main/res/values"
+
+          cat > "$P/settings.gradle" <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'RcfDjayBridgeV14'
+          include ':app'
+          EOF
+
+          cat > "$P/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > "$P/gradle.properties" <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > "$P/app/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.iman.rcfdjaybridge'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.iman.rcfdjaybridge.v14'
+                  minSdk 24
+                  targetSdk 33
+                  versionCode 14
+                  versionName '14.0-one-button-accessibility'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > "$P/app/src/main/res/values/strings.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">RCF djay Bridge</string>
+              <string name="accessibility_desc">Allows RCF MixRemote controls to operate djay on this phone.</string>
+          </resources>
+          EOF
+
+          cat > "$P/app/src/main/res/xml/accessibility_service_config.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:description="@string/accessibility_desc"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:notificationTimeout="30"
+              android:canRetrieveWindowContent="true"
+              android:canPerformGestures="true"
+              android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+              android:packageNames="com.algoriddim.djay_free" />
+          EOF
+
+          cat > "$P/app/src/main/AndroidManifest.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".BridgeVpnService"
+                      android:exported="false"
+                      android:permission="android.permission.BIND_VPN_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.net.VpnService" />
+                      </intent-filter>
+                  </service>
+
+                  <service
+                      android:name=".DjayAccessibilityService"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > "$P/app/src/main/java/com/iman/rcfdjaybridge/MainActivity.java" <<'EOF'
+          package com.iman.rcfdjaybridge;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.ComponentName;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.graphics.Color;
+          import android.net.VpnService;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.provider.Settings;
+          import android.text.TextUtils;
+          import android.view.Gravity;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          public class MainActivity extends Activity {
+              private static final int VPN_REQ = 1401;
+              private static final int NOTIFY_REQ = 1402;
+
+              private Button connect;
+              private TextView status;
+              private boolean waitingForAccessibility = false;
+              private boolean launchedDjay = false;
+              private final Handler handler = new Handler();
+
+              @Override protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  buildUi();
+                  requestNotificationPermissionIfNeeded();
+              }
+
+              @Override protected void onResume() {
+                  super.onResume();
+                  if (waitingForAccessibility && isAccessibilityEnabled()) {
+                      waitingForAccessibility = false;
+                      prepareVpn();
+                  }
+                  refreshStatus();
+              }
+
+              private void buildUi() {
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(22), dp(36), dp(22), dp(30));
+                  root.setGravity(Gravity.CENTER_HORIZONTAL);
+                  root.setBackgroundColor(Color.rgb(15, 17, 21));
+
+                  TextView title = new TextView(this);
+                  title.setText("RCF ↔ djay BRIDGE");
+                  title.setTextColor(Color.WHITE);
+                  title.setTextSize(28);
+                  title.setGravity(Gravity.CENTER);
+                  title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                  root.addView(title, full());
+
+                  TextView sub = new TextView(this);
+                  sub.setText("ONE BUTTON • NO PLAYER • NO TEST CONTROLS");
+                  sub.setTextColor(Color.rgb(80, 190, 240));
+                  sub.setTextSize(13);
+                  sub.setGravity(Gravity.CENTER);
+                  sub.setPadding(0, dp(10), 0, dp(34));
+                  root.addView(sub, full());
+
+                  connect = new Button(this);
+                  connect.setText("CONNECT RCF ↔ DJAY");
+                  connect.setTextSize(19);
+                  connect.setOnClickListener(v -> connectNow());
+                  root.addView(connect, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, dp(68)));
+
+                  status = new TextView(this);
+                  status.setTextColor(Color.LTGRAY);
+                  status.setTextSize(14);
+                  status.setGravity(Gravity.CENTER);
+                  status.setPadding(dp(8), dp(28), dp(8), dp(8));
+                  root.addView(status, full());
+
+                  setContentView(root);
+              }
+
+              private void connectNow() {
+                  if (!isAccessibilityEnabled()) {
+                      waitingForAccessibility = true;
+                      status.setText("Turn ON “RCF djay Bridge” in Accessibility, then return here.");
+                      Intent i = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                      startActivity(i);
+                      return;
+                  }
+                  prepareVpn();
+              }
+
+              private void prepareVpn() {
+                  Intent permission = VpnService.prepare(this);
+                  if (permission != null) {
+                      startActivityForResult(permission, VPN_REQ);
+                  } else {
+                      startBridgeAndDjay();
+                  }
+              }
+
+              @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode == VPN_REQ) {
+                      if (resultCode == RESULT_OK) startBridgeAndDjay();
+                      else status.setText("VPN permission is required for the RCF bridge.");
+                  }
+              }
+
+              private void startBridgeAndDjay() {
+                  Intent i = new Intent(this, BridgeVpnService.class);
+                  i.setAction(BridgeVpnService.ACTION_START);
+                  if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+
+                  connect.setText("CONNECTED");
+                  status.setText("RCF bridge active. Opening djay…");
+
+                  handler.postDelayed(() -> {
+                      Intent djay = getPackageManager().getLaunchIntentForPackage("com.algoriddim.djay_free");
+                      if (djay != null) {
+                          launchedDjay = true;
+                          startActivity(djay);
+                      } else {
+                          status.setText("Bridge active, but djay was not found.");
+                      }
+                  }, 700);
+              }
+
+              private void refreshStatus() {
+                  if (BridgeVpnService.vpnStatus != null && BridgeVpnService.vpnStatus.contains("ACTIVE")) {
+                      connect.setText("CONNECTED");
+                      status.setText("RCF ↔ djay bridge active");
+                  } else if (!isAccessibilityEnabled()) {
+                      status.setText("Tap CONNECT. Android will ask once for Accessibility and VPN permission.");
+                  } else {
+                      status.setText("Ready. Tap CONNECT RCF ↔ DJAY.");
+                  }
+              }
+
+              private boolean isAccessibilityEnabled() {
+                  ComponentName expected = new ComponentName(this, DjayAccessibilityService.class);
+                  String enabled = Settings.Secure.getString(
+                          getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+                  if (enabled == null) return false;
+                  TextUtils.SimpleStringSplitter splitter = new TextUtils.SimpleStringSplitter(':');
+                  splitter.setString(enabled);
+                  while (splitter.hasNext()) {
+                      ComponentName c = ComponentName.unflattenFromString(splitter.next());
+                      if (expected.equals(c)) return true;
+                  }
+                  return false;
+              }
+
+              private void requestNotificationPermissionIfNeeded() {
+                  if (Build.VERSION.SDK_INT >= 33 &&
+                          checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFY_REQ);
+                  }
+              }
+
+              private LinearLayout.LayoutParams full() {
+                  return new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT);
+              }
+
+              private int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+          }
+          EOF
+
+          cat > "$P/app/src/main/java/com/iman/rcfdjaybridge/DjayAccessibilityService.java" <<'EOF'
+          package com.iman.rcfdjaybridge;
+
+          import android.accessibilityservice.AccessibilityService;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.accessibility.AccessibilityEvent;
+          import android.view.accessibility.AccessibilityNodeInfo;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Locale;
+
+          public class DjayAccessibilityService extends AccessibilityService {
+              private static volatile DjayAccessibilityService instance;
+              public static volatile String lastAction = "Waiting for djay";
+              private final Handler main = new Handler(Looper.getMainLooper());
+
+              @Override protected void onServiceConnected() {
+                  super.onServiceConnected();
+                  instance = this;
+                  lastAction = "Accessibility bridge ready";
+              }
+
+              @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+                  if (event != null && event.getPackageName() != null &&
+                          "com.algoriddim.djay_free".contentEquals(event.getPackageName())) {
+                      lastAction = "djay detected";
+                  }
+              }
+
+              @Override public void onInterrupt() { }
+
+              @Override public boolean onUnbind(android.content.Intent intent) {
+                  if (instance == this) instance = null;
+                  return super.onUnbind(intent);
+              }
+
+              public static boolean isReady() {
+                  return instance != null;
+              }
+
+              public static void setControl(String role, float normalized) {
+                  DjayAccessibilityService s = instance;
+                  if (s == null) return;
+                  float v = Math.max(0f, Math.min(1f, normalized));
+                  s.main.post(() -> s.setRangeInternal(role, v));
+              }
+
+              public static void clickControl(String role) {
+                  DjayAccessibilityService s = instance;
+                  if (s == null) return;
+                  s.main.post(() -> s.clickInternal(role));
+              }
+
+              private void setRangeInternal(String role, float normalized) {
+                  AccessibilityNodeInfo root = getRootInActiveWindow();
+                  if (!isDjay(root)) {
+                      lastAction = "Open djay to receive RCF controls";
+                      return;
+                  }
+
+                  AccessibilityNodeInfo node = findByRole(root, role, true);
+                  if (node == null) node = geometryFallback(root, role);
+
+                  if (node == null || node.getRangeInfo() == null) {
+                      lastAction = "djay did not expose " + role + " as an adjustable control";
+                      return;
+                  }
+
+                  AccessibilityNodeInfo.RangeInfo r = node.getRangeInfo();
+                  float actual = r.getMin() + normalized * (r.getMax() - r.getMin());
+                  Bundle args = new Bundle();
+                  args.putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, actual);
+
+                  boolean ok = node.performAction(
+                          AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.getId(), args);
+                  lastAction = ok ? "RCF → djay: " + role : "Could not adjust " + role;
+              }
+
+              private void clickInternal(String role) {
+                  AccessibilityNodeInfo root = getRootInActiveWindow();
+                  if (!isDjay(root)) return;
+
+                  AccessibilityNodeInfo node = findByRole(root, role, false);
+                  while (node != null && !node.isClickable()) node = node.getParent();
+                  if (node != null && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                      lastAction = "RCF → djay: " + role;
+                  } else {
+                      lastAction = "Could not find djay " + role;
+                  }
+              }
+
+              private boolean isDjay(AccessibilityNodeInfo root) {
+                  return root != null && root.getPackageName() != null &&
+                          "com.algoriddim.djay_free".contentEquals(root.getPackageName());
+              }
+
+              private AccessibilityNodeInfo findByRole(
+                      AccessibilityNodeInfo root, String role, boolean requireRange) {
+                  String[][] groups = keywords(role);
+                  if (groups == null) return null;
+
+                  List<AccessibilityNodeInfo> nodes = new ArrayList<>();
+                  collect(root, nodes);
+
+                  AccessibilityNodeInfo best = null;
+                  int bestScore = -1;
+
+                  for (AccessibilityNodeInfo n : nodes) {
+                      if (requireRange && n.getRangeInfo() == null) continue;
+                      String hay = nodeText(n);
+                      for (String[] group : groups) {
+                          int score = 0;
+                          boolean all = true;
+                          for (String k : group) {
+                              if (hay.contains(k)) score++;
+                              else { all = false; break; }
+                          }
+                          if (all && score > bestScore) {
+                              best = n;
+                              bestScore = score;
+                          }
+                      }
+                  }
+                  return best;
+              }
+
+              private AccessibilityNodeInfo geometryFallback(
+                      AccessibilityNodeInfo root, String role) {
+                  if (!"crossfader".equals(role) &&
+                      !"deck_a_volume".equals(role) &&
+                      !"deck_b_volume".equals(role)) return null;
+
+                  List<AccessibilityNodeInfo> nodes = new ArrayList<>();
+                  collect(root, nodes);
+
+                  AccessibilityNodeInfo best = null;
+                  double bestScore = -1;
+
+                  for (AccessibilityNodeInfo n : nodes) {
+                      if (n.getRangeInfo() == null) continue;
+                      android.graphics.Rect b = new android.graphics.Rect();
+                      n.getBoundsInScreen(b);
+                      if (b.width() <= 0 || b.height() <= 0) continue;
+
+                      if ("crossfader".equals(role)) {
+                          double ratio = (double)b.width() / Math.max(1, b.height());
+                          double score = ratio * b.width();
+                          if (ratio > 2.2 && score > bestScore) {
+                              best = n; bestScore = score;
+                          }
+                      } else {
+                          boolean left = "deck_a_volume".equals(role);
+                          int screenW = getResources().getDisplayMetrics().widthPixels;
+                          int cx = b.centerX();
+                          if ((left && cx >= screenW / 2) || (!left && cx < screenW / 2)) continue;
+                          double ratio = (double)b.height() / Math.max(1, b.width());
+                          double score = ratio * b.height();
+                          if (ratio > 1.4 && score > bestScore) {
+                              best = n; bestScore = score;
+                          }
+                      }
+                  }
+                  return best;
+              }
+
+              private void collect(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
+                  if (node == null) return;
+                  out.add(node);
+                  for (int i = 0; i < node.getChildCount(); i++) {
+                      AccessibilityNodeInfo c = node.getChild(i);
+                      if (c != null) collect(c, out);
+                  }
+              }
+
+              private String nodeText(AccessibilityNodeInfo n) {
+                  StringBuilder b = new StringBuilder();
+                  if (n.getText() != null) b.append(n.getText()).append(' ');
+                  if (n.getContentDescription() != null) b.append(n.getContentDescription()).append(' ');
+                  if (n.getViewIdResourceName() != null) b.append(n.getViewIdResourceName()).append(' ');
+                  return b.toString().toLowerCase(Locale.US);
+              }
+
+              private String[][] keywords(String role) {
+                  switch (role) {
+                      case "master_volume":
+                          return new String[][]{
+                                  {"master","volume"}, {"master","level"}, {"master","gain"}};
+                      case "crossfader":
+                          return new String[][]{{"crossfader"}, {"cross","fader"}};
+                      case "deck_a_volume":
+                          return new String[][]{
+                                  {"deck a","volume"}, {"deck 1","volume"},
+                                  {"channel 1","volume"}, {"left","volume"}};
+                      case "deck_b_volume":
+                          return new String[][]{
+                                  {"deck b","volume"}, {"deck 2","volume"},
+                                  {"channel 2","volume"}, {"right","volume"}};
+                      case "deck_a_low":
+                          return new String[][]{
+                                  {"deck a","low"}, {"deck 1","low"},
+                                  {"channel 1","low"}, {"left","low"}};
+                      case "deck_b_low":
+                          return new String[][]{
+                                  {"deck b","low"}, {"deck 2","low"},
+                                  {"channel 2","low"}, {"right","low"}};
+                      case "deck_a_mid":
+                          return new String[][]{
+                                  {"deck a","mid"}, {"deck 1","mid"},
+                                  {"channel 1","mid"}, {"left","mid"}};
+                      case "deck_b_mid":
+                          return new String[][]{
+                                  {"deck b","mid"}, {"deck 2","mid"},
+                                  {"channel 2","mid"}, {"right","mid"}};
+                      case "deck_a_high":
+                          return new String[][]{
+                                  {"deck a","high"}, {"deck 1","high"},
+                                  {"channel 1","high"}, {"left","high"}};
+                      case "deck_b_high":
+                          return new String[][]{
+                                  {"deck b","high"}, {"deck 2","high"},
+                                  {"channel 2","high"}, {"right","high"}};
+                      case "play_a":
+                          return new String[][]{
+                                  {"deck a","play"}, {"deck 1","play"}, {"left","play"}, {"play a"}};
+                      case "play_b":
+                          return new String[][]{
+                                  {"deck b","play"}, {"deck 2","play"}, {"right","play"}, {"play b"}};
+                      default:
+                          return null;
+                  }
+              }
+          }
+          EOF
+
+          cat > "$P/app/src/main/java/com/iman/rcfdjaybridge/AutoMapper.java" <<'EOF'
+          package com.iman.rcfdjaybridge;
+
+          import java.util.Map;
+          import java.util.concurrent.ConcurrentHashMap;
+
+          /**
+           * Fixed automatic mapping:
+           * RCF channel 1 = djay Deck A
+           * RCF channel 2 = djay Deck B
+           * RCF Main fader = djay Master volume
+           * RCF channel 1 Pan = djay Crossfader
+           * RCF EQ bands 1/2/4 = Low/Mid/High on each deck
+           * RCF channel 1/2 mute buttons = Play/Pause A/B
+           */
+          public final class AutoMapper {
+              private AutoMapper() {}
+
+              private static final Map<String, Float> last = new ConcurrentHashMap<>();
+              private static final Map<String, Long> lastSent = new ConcurrentHashMap<>();
+
+              public static void onRcfOsc(String address, float raw) {
+                  if (address == null || !DjayAccessibilityService.isReady()) return;
+
+                  if ("/00/00/fd_000".equals(address)) {
+                      sendContinuous(address, "master_volume", clamp01(raw));
+                      return;
+                  }
+
+                  if ("/01/01/fd_000".equals(address)) {
+                      sendContinuous(address, "deck_a_volume", clamp01(raw));
+                      return;
+                  }
+                  if ("/01/02/fd_000".equals(address)) {
+                      sendContinuous(address, "deck_b_volume", clamp01(raw));
+                      return;
+                  }
+
+                  if ("/01/01/bl_000".equals(address)) {
+                      sendContinuous(address, "crossfader", normalizePan(raw));
+                      return;
+                  }
+
+                  if ("/01/01/eq_003".equals(address)) {
+                      sendContinuous(address, "deck_a_low", normalizeEq(raw));
+                      return;
+                  }
+                  if ("/01/02/eq_003".equals(address)) {
+                      sendContinuous(address, "deck_b_low", normalizeEq(raw));
+                      return;
+                  }
+                  if ("/01/01/eq_007".equals(address)) {
+                      sendContinuous(address, "deck_a_mid", normalizeEq(raw));
+                      return;
+                  }
+                  if ("/01/02/eq_007".equals(address)) {
+                      sendContinuous(address, "deck_b_mid", normalizeEq(raw));
+                      return;
+                  }
+                  if ("/01/01/eq_013".equals(address)) {
+                      sendContinuous(address, "deck_a_high", normalizeEq(raw));
+                      return;
+                  }
+                  if ("/01/02/eq_013".equals(address)) {
+                      sendContinuous(address, "deck_b_high", normalizeEq(raw));
+                      return;
+                  }
+
+                  if ("/01/01/mt_000".equals(address)) {
+                      risingButton(address, raw, "play_a");
+                      return;
+                  }
+                  if ("/01/02/mt_000".equals(address)) {
+                      risingButton(address, raw, "play_b");
+                  }
+              }
+
+              private static void sendContinuous(String address, String role, float value) {
+                  float prev = last.containsKey(address) ? last.get(address) : -99f;
+                  long now = System.currentTimeMillis();
+                  long prevTime = lastSent.containsKey(address) ? lastSent.get(address) : 0L;
+                  if (Math.abs(value - prev) < 0.01f && now - prevTime < 90L) return;
+                  if (now - prevTime < 25L) return;
+                  last.put(address, value);
+                  lastSent.put(address, now);
+                  DjayAccessibilityService.setControl(role, value);
+              }
+
+              private static void risingButton(String address, float raw, String role) {
+                  float value = clamp01(raw);
+                  float prev = last.containsKey(address) ? last.get(address) : 0f;
+                  last.put(address, value);
+                  if (value >= 0.5f && prev < 0.5f) {
+                      DjayAccessibilityService.clickControl(role);
+                  }
+              }
+
+              private static float clamp01(float v) {
+                  if (Float.isNaN(v) || Float.isInfinite(v)) return 0f;
+                  return Math.max(0f, Math.min(1f, v));
+              }
+
+              private static float normalizePan(float v) {
+                  if (v >= 0f && v <= 1f) return v;
+                  if (v >= -1f && v <= 1f) return (v + 1f) * 0.5f;
+                  return clamp01(v);
+              }
+
+              private static float normalizeEq(float v) {
+                  if (v >= 0f && v <= 1f) return v;
+                  // RCF EQ gain values are commonly represented around a 0 dB center.
+                  if (v >= -24f && v <= 24f) return (v + 24f) / 48f;
+                  return 0.5f;
+              }
+          }
+          EOF
+
+          # Reuse the already-working RCF M18 VPN/OSC emulator from v13,
+          # replacing only the destination from virtual MIDI to the automatic same-phone mapper.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          src_path = Path(".github/workflows/RCF_DJAY_BRIDGE_V13_CLEAN.yml")
+          if not src_path.exists():
+              raise SystemExit("v13 workflow is required in .github/workflows")
+
+          src = src_path.read_text()
+          marker = 'cat > "$P/app/src/main/java/com/iman/rcfdjaybridge/BridgeVpnService.java" <<\'FILE_9_EOF\'\n'
+          if marker not in src:
+              raise SystemExit("Could not locate BridgeVpnService in v13 workflow")
+
+          body = src.split(marker, 1)[1].split("\n          FILE_9_EOF", 1)[0]
+          body = body.replace(
+              "then forwards real control changes to RcfMidiMapper.",
+              "then forwards real control changes to AutoMapper."
+          )
+          body = body.replace(
+              "RcfMidiMapper.onRcfOsc(this, m.address, value);",
+              "AutoMapper.onRcfOsc(m.address, value);"
+          )
+
+          out = Path(os.environ["P"]) / "app/src/main/java/com/iman/rcfdjaybridge/BridgeVpnService.java"
+          out.write_text(body)
+          PY
+
+          cd "$P"
+          gradle :app:assembleDebug --no-daemon
+
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             "$GITHUB_WORKSPACE/out/RCF-DJAY-BRIDGE-v14-ONE-BUTTON.apk"
+
+      - name: Verify APK
+        run: |
+          set -e
+          APK="out/RCF-DJAY-BRIDGE-v14-ONE-BUTTON.apk"
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | head -20
+          sha256sum "$APK" | tee out/SHA256.txt
+
+      - name: Upload verified APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RCF-DJAY-BRIDGE-v14-ONE-BUTTON
+          path: |
+            out/RCF-DJAY-BRIDGE-v14-ONE-BUTTON.apk
+            out/SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
